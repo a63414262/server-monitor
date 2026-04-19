@@ -1,0 +1,14 @@
+{
+  "name": "cf-server-monitor-node",
+  "version": "1.0.0",
+  "description": "Server Monitor Pro (Node Edition)",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^10.0.0",
+    "express": "^4.19.2"
+  }
+}
