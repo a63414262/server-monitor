@@ -81,9 +81,9 @@ const checkAuth = (req) => {
 };
 
 const requireAuth = (req, res, next) => {
-    const sys = getSysSettings();
     if (!checkAuth(req)) {
-        res.setHeader('WWW-Authenticate', `Basic realm="${sys.admin_title}"`);
+        // 修复：必须使用纯 ASCII 字符，避免 Node.js 抛出 Invalid character in header 错误
+        res.setHeader('WWW-Authenticate', 'Basic realm="Admin Area"');
         return res.status(401).send('Unauthorized');
     }
     next();
@@ -621,7 +621,8 @@ app.post('/update', (req, res) => {
 app.get('/api/server', (req, res) => {
     const sys = getSysSettings();
     if (sys.is_public !== 'true' && !checkAuth(req)) {
-        res.setHeader('WWW-Authenticate', `Basic realm="${sys.site_title}"`);
+        // 修复：必须使用纯 ASCII 字符
+        res.setHeader('WWW-Authenticate', 'Basic realm="Secure Area"');
         return res.status(401).send('Unauthorized');
     }
     const id = req.query.id;
@@ -634,7 +635,8 @@ app.get('/api/server', (req, res) => {
 app.get('/', (req, res) => {
     const sys = getSysSettings();
     if (sys.is_public !== 'true' && !checkAuth(req)) {
-        res.setHeader('WWW-Authenticate', `Basic realm="${sys.site_title}"`);
+        // 修复：必须使用纯 ASCII 字符
+        res.setHeader('WWW-Authenticate', 'Basic realm="Secure Area"');
         return res.status(401).send('Unauthorized');
     }
 
