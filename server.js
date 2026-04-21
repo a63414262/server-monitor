@@ -79,16 +79,18 @@ db.exec(`
   );
 `);
 
-try {
-    db.exec("ALTER TABLE servers ADD COLUMN ssh_host TEXT DEFAULT ''");
-    db.exec("ALTER TABLE servers ADD COLUMN ssh_port TEXT DEFAULT '22'");
-    db.exec("ALTER TABLE servers ADD COLUMN ssh_user TEXT DEFAULT 'root'");
-    db.exec("ALTER TABLE servers ADD COLUMN ssh_pass TEXT DEFAULT ''");
-    db.exec("ALTER TABLE servers ADD COLUMN ping_ct TEXT DEFAULT '0'");
-    db.exec("ALTER TABLE servers ADD COLUMN ping_cu TEXT DEFAULT '0'");
-    db.exec("ALTER TABLE servers ADD COLUMN ping_cm TEXT DEFAULT '0'");
-    db.exec("ALTER TABLE servers ADD COLUMN ping_bd TEXT DEFAULT '0'");
-} catch (e) {}
+// 【核心修复】：逐个列独立校验升级，防止一个报错导致后续全部中断
+const addColumn = (table, column, def) => {
+    try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT DEFAULT '${def}'`); } catch (e) {}
+};
+addColumn('servers', 'ssh_host', '');
+addColumn('servers', 'ssh_port', '22');
+addColumn('servers', 'ssh_user', 'root');
+addColumn('servers', 'ssh_pass', '');
+addColumn('servers', 'ping_ct', '0');
+addColumn('servers', 'ping_cu', '0');
+addColumn('servers', 'ping_cm', '0');
+addColumn('servers', 'ping_bd', '0');
 
 const formatBytes = (bytes) => {
     const b = parseInt(bytes);
@@ -201,24 +203,24 @@ app.ws('/ssh', (ws, req) => {
         try {
             const data = JSON.parse(msg);
             if (data.type === 'connect') {
-                const server = db.prepare('SELECT ssh_host, ssh_port, ssh_user FROM servers WHERE id = ?').get(data.serverId);
+                const server = db.prepare('SELECT ssh_host, ssh_port, ssh_user, ssh_pass FROM servers WHERE id = ?').get(data.serverId);
                 if (!server) return ws.send(JSON.stringify({ type: 'error', msg: '找不到服务器记录！' }));
 
                 const targetHost = data.host || server.ssh_host;
                 const targetPort = parseInt(data.port || server.ssh_port || 22);
                 const authUser = data.username || server.ssh_user || 'root';
+                const authPass = data.password || server.ssh_pass || '';
 
                 if (!targetHost) {
                     ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 缺少 IP 地址，请等待探针上报！\r\n' }));
                     return;
                 }
 
-                // 核心：强制使用面板自带的私钥进行鉴权！
                 const sshConfig = { username: authUser, privateKey: MASTER_PRIVATE_KEY, tryKeyboard: true };
                 const isIPv6 = targetHost.includes(':');
 
                 conn.on('ready', () => {
-                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n✅ 密钥鉴权成功，已连接到服务器...\r\n' }));
+                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n✅ 鉴权成功，已连接到服务器...\r\n' }));
                     conn.shell({ term: 'xterm-color' }, (err, stream) => {
                         if (err) return ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ Shell 创建失败: ' + err.message + '\r\n' }));
                         streamObj = stream;
@@ -231,8 +233,7 @@ app.ws('/ssh', (ws, req) => {
                 }).on('error', (err) => {
                     ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 连接失败: ' + err.message + '\r\n' }));
                 }).on('keyboard-interactive', (name, instr, lang, prompts, finish) => {
-                    // 预留后路：若私钥失败，尝试回退使用界面填的临时密码
-                    finish([data.password || '']);
+                    finish([authPass]);
                 });
 
                 if (isIPv6 && !targetHost.startsWith('fd00:')) {
@@ -293,130 +294,28 @@ const checkOfflineNodes = async () => {
     } catch (e) {}
 };
 
-app.post('/update', (req, res) => {
+app.post('/admin/api', requireWebAuth, (req, res) => {
     try {
-        const { id, secret, ssh_host, ssh_port, metrics } = req.body;
-        if (secret !== API_SECRET) return res.status(401).send('Unauthorized');
-        let countryCode = req.headers['cf-ipcountry'] || 'XX';
-        if (countryCode.toUpperCase() === 'TW') countryCode = 'CN';
-        const serverExists = db.prepare('SELECT id FROM servers WHERE id = ?').get(id);
-        if (!serverExists) return res.status(404).send('Server not found');
-
-        db.prepare(`
-          UPDATE servers 
-          SET cpu = ?, ram = ?, disk = ?, load_avg = ?, uptime = ?, last_updated = ?,
-              ram_total = ?, net_rx = ?, net_tx = ?, net_in_speed = ?, net_out_speed = ?,
-              os = ?, cpu_info = ?, arch = ?, boot_time = ?, ram_used = ?, swap_total = ?, 
-              swap_used = ?, disk_total = ?, disk_used = ?, processes = ?, tcp_conn = ?, udp_conn = ?, 
-              country = ?, ip_v4 = ?, ip_v6 = ?, ping_ct = ?, ping_cu = ?, ping_cm = ?, ping_bd = ?,
-              ssh_host = ?, ssh_port = ?
-          WHERE id = ?
-        `).run(
-          metrics.cpu, metrics.ram, metrics.disk, metrics.load, metrics.uptime, Date.now(),
-          metrics.ram_total || '0', metrics.net_rx || '0', metrics.net_tx || '0', 
-          metrics.net_in_speed || '0', metrics.net_out_speed || '0', 
-          metrics.os || '', metrics.cpu_info || '', metrics.arch || '', metrics.boot_time || '',
-          metrics.ram_used || '0', metrics.swap_total || '0', metrics.swap_used || '0',
-          metrics.disk_total || '0', metrics.disk_used || '0', metrics.processes || '0',
-          metrics.tcp_conn || '0', metrics.udp_conn || '0', countryCode, 
-          metrics.ip_v4 || '0', metrics.ip_v6 || '0', 
-          metrics.ping_ct || '0', metrics.ping_cu || '0', metrics.ping_cm || '0', metrics.ping_bd || '0', 
-          ssh_host || '', ssh_port || '22', id
-        );
-        checkOfflineNodes().catch(console.error);
-        res.status(200).send('OK');
-    } catch (e) { res.status(400).send('Error'); }
+        const data = req.body;
+        if (data.action === 'save_settings') {
+            const stmt = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+            db.transaction(() => { for (const [k, v] of Object.entries(data.settings)) stmt.run(k, v); })();
+            res.json({ success: true });
+        } 
+        else if (data.action === 'add') {
+            db.prepare(`INSERT INTO servers (id, name, cpu, ram, disk, load_avg, uptime, last_updated, ram_total, net_rx, net_tx, net_in_speed, net_out_speed, os, cpu_info, country, server_group, price, expire_date, bandwidth, traffic_limit, ip_v4, ip_v6, ping_ct, ping_cu, ping_cm, ping_bd, ssh_host, ssh_port, ssh_user, ssh_pass) VALUES (?, ?, '0', '0', '0', '0', '0', 0, '0', '0', '0', '0', '0', '', '', '', '默认分组', '免费', '', '', '', '0', '0', '0', '0', '0', '0', '', '22', 'root', '')`).run(crypto.randomUUID(), data.name || 'New Server');
+            res.json({ success: true });
+        } 
+        else if (data.action === 'delete') {
+            db.prepare('DELETE FROM servers WHERE id = ?').run(data.id);
+            res.json({ success: true });
+        } 
+        else if (data.action === 'edit') {
+            db.prepare(`UPDATE servers SET server_group = ?, price = ?, expire_date = ?, bandwidth = ?, traffic_limit = ?, ssh_host = ?, ssh_port = ?, ssh_user = ?, ssh_pass = ? WHERE id = ?`).run(data.server_group || '默认分组', data.price || '', data.expire_date || '', data.bandwidth || '', data.traffic_limit || '', data.ssh_host || '', data.ssh_port || '22', data.ssh_user || 'root', data.ssh_pass || '', data.id);
+            res.json({ success: true });
+        }
+    } catch (e) { res.status(400).json({ error: e.message }); }
 });
-
-app.post('/update-ip', (req, res) => {
-    try {
-        const { id, secret, report_b64 } = req.body;
-        if (secret !== API_SECRET) return res.status(401).send('Unauthorized');
-        const reportText = Buffer.from(report_b64, 'base64').toString('utf-8');
-        db.prepare('INSERT INTO ip_reports (id, server_id, created_at, report_text) VALUES (?, ?, ?, ?)').run(crypto.randomUUID(), id, Date.now(), reportText);
-        db.prepare(`DELETE FROM ip_reports WHERE id NOT IN (SELECT id FROM ip_reports WHERE server_id = ? ORDER BY created_at DESC LIMIT 30) AND server_id = ?`).run(id, id);
-        res.status(200).send('OK');
-    } catch (e) { res.status(400).send('Error'); }
-});
-
-app.get('/api/server', (req, res) => {
-    const sys = getSysSettings();
-    if (sys.is_public !== 'true' && !checkWebAuth(req)) return res.status(401).send('Unauthorized');
-    const id = req.query.id;
-    if (!id) return res.status(400).send('Miss ID');
-    const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
-    if (!server) return res.status(404).send('Not Found');
-    if (!checkWebAuth(req)) { delete server.ssh_pass; delete server.ssh_user; delete server.ssh_host; }
-    res.json(server);
-});
-
-app.get('/api/ip-history', requireWebAuth, (req, res) => {
-    res.json(db.prepare('SELECT created_at, report_text FROM ip_reports WHERE server_id = ? ORDER BY created_at DESC').all(req.query.id));
-});
-
-// 安全分发主控端公钥接口
-app.get('/update-pubkey', (req, res) => {
-    res.setHeader('Content-Type', 'text/plain;charset=UTF-8');
-    res.send(MASTER_PUBLIC_KEY);
-});
-
-// ==========================================
-// 前后台 UI 渲染
-// ==========================================
-const getThemeStyles = (sys) => `
-    body.theme2 { background-color: #0d1117; color: #c9d1d9; }
-    .theme2 .vps-card, .theme2 .global-stats, .theme2 .header-card, .theme2 .chart-card { background: #161b22; color: #c9d1d9; box-shadow: 0 4px 6px rgba(0,0,0,0.4); border: 1px solid #30363d; }
-    .theme2 .vps-card:hover { border-color: #8b949e; }
-    .theme2 .group-header { color: #58a6ff; border-left-color: #58a6ff; }
-    .theme2 .stat-val, .theme2 .g-val { color: #fff; }
-    .theme2 .stat-label, .theme2 .g-label, .theme2 .g-sub, .theme2 .card-meta { color: #8b949e; }
-    .theme2 .stat-bar { background: #21262d; }
-    .theme2 .divider { background: #30363d; }
-    .theme2 .card-title { color: #fff; }
-
-    body.theme3 { background-color: #fef08a; color: #000; font-weight: 500; }
-    .theme3 .vps-card, .global-stats, .header-card, .chart-card { background: #fff; border: 3px solid #000; border-radius: 0; box-shadow: 6px 6px 0px #000; transition: transform 0.1s, box-shadow 0.1s; }
-    .theme3 .vps-card:hover { transform: translate(2px, 2px); box-shadow: 4px 4px 0px #000; border-color: #000; }
-    .theme3 .group-header { color: #000; border-left: none; border-bottom: 4px solid #000; padding-left: 0; display: inline-block; font-size: 22px; font-weight: 900; text-transform: uppercase; }
-    .theme3 .stat-bar { background: #e5e5e5; border: 1px solid #000; }
-    .theme3 .stat-bar > div { border-right: 1px solid #000; }
-    .theme3 .badge { border: 1px solid #000; border-radius: 0; }
-    .theme3 .stat-val, .theme3 .g-val, .theme3 .card-title { font-weight: 900; color: #000; }
-
-    body.theme4 { background: linear-gradient(45deg, #4facfe 0%, #00f2fe 100%); background-attachment: fixed; color: #fff; }
-    .theme4 .vps-card, .theme4 .global-stats, .theme4 .header-card, .theme4 .chart-card { background: rgba(255, 255, 255, 0.2); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border: 1px solid rgba(255, 255, 255, 0.4); box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.1); color: #fff; }
-    .theme4 .vps-card:hover { background: rgba(255, 255, 255, 0.3); border-color: rgba(255, 255, 255, 0.8); }
-    .theme4 .group-header { color: #fff; border-left-color: #fff; text-shadow: 0 2px 4px rgba(0,0,0,0.2); }
-    .theme4 .stat-val, .theme4 .g-val, .theme4 .card-title { color: #fff; }
-    .theme4 .stat-label, .theme4 .g-label, .theme4 .g-sub, .theme4 .card-meta { color: rgba(255,255,255,0.8); }
-    .theme4 .stat-bar { background: rgba(0,0,0,0.2); }
-    .theme4 .divider { background: rgba(255,255,255,0.2); }
-
-    body.theme5 { background-color: #050505; color: #0ff; font-family: 'Courier New', Courier, monospace; }
-    .theme5 .vps-card, .theme5 .global-stats, .theme5 .header-card, .theme5 .chart-card { background: #0b0c10; border: 1px solid #f0f; border-radius: 0; box-shadow: 0 0 10px rgba(255, 0, 255, 0.2); color: #fff; }
-    .theme5 .vps-card:hover { box-shadow: 0 0 20px rgba(0, 255, 255, 0.5); border-color: #0ff; }
-    .theme5 .group-header { color: #f0f; border-left: 5px solid #0ff; text-shadow: 0 0 5px #f0f; }
-    .theme5 .stat-val, .theme5 .g-val, .theme5 .card-title { color: #0ff; text-shadow: 0 0 5px #0ff; }
-    .theme5 .stat-label, .theme5 .g-label, .theme5 .g-sub, .theme5 .card-meta { color: #f0f; }
-    .theme5 .stat-bar { background: #222; }
-    .theme5 .stat-bar > div { background: #0ff !important; box-shadow: 0 0 10px #0ff; }
-    .theme5 .divider { background: #333; }
-    .theme5 .badge-bw { background: #f0f; box-shadow: 0 0 5px #f0f; }
-    .theme5 .badge-tf { background: #0ff; color:#000; box-shadow: 0 0 5px #0ff; }
-    .ping-box { font-size:11px; margin-top:10px; display:flex; gap:10px; padding: 6px 8px; border-radius: 4px; flex-wrap:wrap; background: rgba(150,150,150,0.1); border: 1px solid rgba(150,150,150,0.2); }
-
-    ${sys.custom_bg ? `
-      body { background: url('${sys.custom_bg}') no-repeat center center fixed !important; background-size: cover !important; }
-      .vps-card, .global-stats, .header-card, .chart-card { background: rgba(255, 255, 255, 0.4) !important; backdrop-filter: blur(12px) !important; -webkit-backdrop-filter: blur(12px) !important; border: 1px solid rgba(255, 255, 255, 0.6) !important; box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.1) !important; color: #111 !important; }
-      .vps-card:hover { background: rgba(255, 255, 255, 0.6) !important; transform: translateY(-3px); }
-      .group-header { color: #fff !important; text-shadow: 0 2px 5px rgba(0,0,0,0.6) !important; border-left-color: #fff !important; }
-      .stat-val, .g-val, .card-title { color: #000 !important; font-weight: 800 !important; }
-      .stat-label, .g-label, .g-sub, .card-meta { color: #333 !important; font-weight: 600 !important; }
-      .stat-bar { background: rgba(0,0,0,0.1) !important; }
-    ` : ''}
-`;
-
-const footerHtml = `<div style="text-align: center; margin-top: 40px; padding-bottom: 20px; font-size: 13px; color: inherit; opacity: 0.8;">Powered by CF-Server-Monitor-Pro | Node.js Edition</div>`;
 
 app.get('/admin', requireWebAuth, (req, res) => {
     const sys = getSysSettings();
@@ -437,7 +336,7 @@ app.get('/admin', requireWebAuth, (req, res) => {
                     <td>
                         <input type="text" readonly value="${cmd}" style="width:280px; padding:6px; margin-right:5px; border:1px solid #ccc; border-radius:4px;" id="cmd-${s.id}">
                         <button onclick="copyCmd('${s.id}')" class="btn btn-gray">复制命令</button>
-                        <button onclick="openEditModal('${s.id}', '${s.server_group||''}', '${s.price||''}', '${s.expire_date||''}', '${s.bandwidth||''}', '${s.traffic_limit||''}')" class="btn btn-blue">✏️ 编辑</button>
+                        <button onclick="openEditModal('${s.id}', '${s.server_group||''}', '${s.price||''}', '${s.expire_date||''}', '${s.bandwidth||''}', '${s.traffic_limit||''}', '${s.ssh_host||''}', '${s.ssh_port||'22'}', '${s.ssh_user||'root'}')" class="btn btn-blue">✏️ 编辑</button>
                         <button onclick="openIpHistoryModal('${s.id}', '${s.name}')" class="btn btn-purple">🌐 IP质量</button>
                         <button onclick="openSshModal('${s.id}', '${s.name}', '${s.ssh_host||''}', '${s.ssh_port||'22'}', '${s.ssh_user||'root'}')" class="btn btn-green">💻 SSH</button>
                         <button onclick="deleteServer('${s.id}')" class="btn btn-red">🗑️ 删除</button>
@@ -548,6 +447,18 @@ app.get('/admin', requireWebAuth, (req, res) => {
             <div style="flex:1"><label>带宽</label> <input type="text" id="editBandwidth" placeholder="如：1Gbps"></div>
             <div style="flex:1"><label>流量总量</label> <input type="text" id="editTraffic" placeholder="如：1TB/月"></div>
           </div>
+          
+          <hr style="margin: 15px 0; border: none; border-top: 1px dashed #ccc;">
+          <label style="color:#8b5cf6;">💻 SSH 直连高级配置</label>
+          <div style="display:flex; gap:10px;">
+            <div style="flex:1"><label>连接 IP</label><input type="text" id="editSshHost" placeholder="探针已自动获取，可手动覆盖"></div>
+            <div style="width:70px"><label>端口</label><input type="text" id="editSshPort" placeholder="22"></div>
+          </div>
+          <div style="display:flex; gap:10px;">
+            <div style="flex:1"><label>用户名</label><input type="text" id="editSshUser" placeholder="root"></div>
+            <div style="flex:1"><label>临时密码</label><input type="password" id="editSshPass" placeholder="(已开启私钥秒连,无需填)"></div>
+          </div>
+
           <div style="text-align: right; margin-top: 10px;">
             <button onclick="closeModal('editModal')" style="padding: 8px 15px; border: 1px solid #ccc; background: white; margin-right: 5px; cursor:pointer;">取消</button>
             <button onclick="saveEdit()" class="btn btn-blue" style="padding: 8px 15px;">保存更改</button>
@@ -606,7 +517,7 @@ app.get('/admin', requireWebAuth, (req, res) => {
             <div style="flex:1;"><label>目标IP/域名</label><input type="text" id="sshHost" placeholder="探针已自动获取，可手动覆盖"></div>
             <div style="width:80px;"><label>端口</label><input type="text" id="sshPort" placeholder="22"></div>
             <div style="width:120px;"><label>用户名</label><input type="text" id="sshUser" placeholder="root"></div>
-            <div style="flex:1;"><label>密码(可留空走私钥)</label><input type="password" id="sshPass" placeholder="🔑 已全自动发卡免密"></div>
+            <div style="flex:1;"><label>密码(若私钥失败可填此)</label><input type="password" id="sshPass" placeholder="🔑 已全自动发卡免密"></div>
             <button onclick="connectSsh()" class="btn btn-green" style="padding: 10px 20px; margin-bottom:12px;">⚡ 连接</button>
           </div>
           <div class="preset-btns">
@@ -623,6 +534,22 @@ app.get('/admin', requireWebAuth, (req, res) => {
       </div>
       
       <script>
+        // 【核心修复】：增加 API 统一请求层，如果因为重启导致 Session 失效，会明确提示你刷新页面
+        async function apiCall(data) {
+            const res = await fetch('/admin/api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+            if (res.status === 401) {
+                alert('⚠️ 会话已过期或主控端刚重启，请点击确定后重新授权登录！');
+                location.reload();
+                return false;
+            }
+            if (!res.ok) {
+                const err = await res.json();
+                alert('操作失败: ' + (err.error || '未知错误'));
+                return false;
+            }
+            return true;
+        }
+
         async function saveSettings() {
           const data = {
             action: 'save_settings',
@@ -641,21 +568,18 @@ app.get('/admin', requireWebAuth, (req, res) => {
               tg_chat_id: document.getElementById('cfg_tg_chat_id').value
             }
           };
-          const res = await fetch('/admin/api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
-          if (res.ok) { alert('✅ 设置已保存！'); location.reload(); } else alert('保存失败');
+          if (await apiCall(data)) { alert('✅ 设置已保存！'); location.reload(); }
         }
 
         async function addServer() {
           const name = document.getElementById('newName').value;
           if (!name) return alert('请输入名称');
-          const res = await fetch('/admin/api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'add', name }) });
-          if (res.ok) location.reload(); else alert('添加失败');
+          if (await apiCall({ action: 'add', name })) location.reload();
         }
 
         async function deleteServer(id) {
           if (!confirm('确定要删除这个节点吗？')) return;
-          const res = await fetch('/admin/api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'delete', id }) });
-          if (res.ok) location.reload(); else alert('删除失败');
+          if (await apiCall({ action: 'delete', id })) location.reload();
         }
 
         function copyCmd(id) {
@@ -664,13 +588,17 @@ app.get('/admin', requireWebAuth, (req, res) => {
           alert('✅ 一键安装命令已复制！');
         }
 
-        function openEditModal(id, group, price, expire, bw, traffic) {
+        function openEditModal(id, group, price, expire, bw, traffic, shost, sport, suser) {
           document.getElementById('editId').value = id;
           document.getElementById('editGroup').value = group || '默认分组';
           document.getElementById('editPrice').value = price || '免费';
           document.getElementById('editExpire').value = expire || '';
           document.getElementById('editBandwidth').value = bw || '';
           document.getElementById('editTraffic').value = traffic || '';
+          document.getElementById('editSshHost').value = shost || '';
+          document.getElementById('editSshPort').value = sport || '22';
+          document.getElementById('editSshUser').value = suser || 'root';
+          document.getElementById('editSshPass').value = '';
           document.getElementById('editModal').style.display = 'block';
         }
 
@@ -681,10 +609,13 @@ app.get('/admin', requireWebAuth, (req, res) => {
             action: 'edit', id: document.getElementById('editId').value,
             server_group: document.getElementById('editGroup').value, price: document.getElementById('editPrice').value,
             expire_date: document.getElementById('editExpire').value, bandwidth: document.getElementById('editBandwidth').value,
-            traffic_limit: document.getElementById('editTraffic').value
+            traffic_limit: document.getElementById('editTraffic').value,
+            ssh_host: document.getElementById('editSshHost').value,
+            ssh_port: document.getElementById('editSshPort').value,
+            ssh_user: document.getElementById('editSshUser').value,
+            ssh_pass: document.getElementById('editSshPass').value
           };
-          const res = await fetch('/admin/api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
-          if (res.ok) location.reload(); else alert('保存失败');
+          if (await apiCall(data)) location.reload();
         }
 
         function openCalcModal() { document.getElementById('calcModal').style.display = 'block'; }
@@ -806,7 +737,7 @@ app.get('/admin', requireWebAuth, (req, res) => {
 });
 
 // ==========================================
-// 前台大盘展示与详情页
+// 前台与探针接口
 // ==========================================
 app.get('/', (req, res) => {
     const sys = getSysSettings();
