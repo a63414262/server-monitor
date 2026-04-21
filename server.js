@@ -11,11 +11,16 @@ expressWs(app);
 app.use(express.json({ limit: '10mb' }));
 
 // ==========================================
-// 容器环境变量配置
+// 容器环境变量配置 (新增 GitHub OAuth 参数)
 // ==========================================
 const PORT = process.env.PORT || 3000;
-const API_SECRET = process.env.API_SECRET || 'admin123';
+const API_SECRET = process.env.API_SECRET || 'admin123'; // 仅保留用于探针节点上报数据
 const DB_PATH = process.env.DB_PATH || '/app/data/monitor.db';
+
+const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || '';
+const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || '';
+// 允许登录的 GitHub 用户名白名单（逗号分隔），防止全网任何人都能登入你的后台！
+const GITHUB_ALLOWED_USERS = (process.env.GITHUB_ALLOWED_USERS || '').split(',').map(u => u.trim().toLowerCase()).filter(Boolean);
 
 const dbDir = path.dirname(DB_PATH);
 if (!fs.existsSync(dbDir)) {
@@ -25,25 +30,25 @@ if (!fs.existsSync(dbDir)) {
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 
-// 初始化表结构
+// 初始化表结构 (新增 sessions 表)
 db.exec(`
   CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
-  
+  CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, username TEXT, created_at INTEGER);
   CREATE TABLE IF NOT EXISTS servers (
     id TEXT PRIMARY KEY, name TEXT, cpu TEXT, ram TEXT, disk TEXT, load_avg TEXT,
     uptime TEXT, last_updated INTEGER, ram_total TEXT, net_rx TEXT, net_tx TEXT,
     net_in_speed TEXT, net_out_speed TEXT, os TEXT, cpu_info TEXT, country TEXT,
     server_group TEXT, price TEXT, expire_date TEXT, bandwidth TEXT, traffic_limit TEXT,
     ip_v4 TEXT, ip_v6 TEXT, arch TEXT, boot_time TEXT, ram_used TEXT, swap_total TEXT,
-    swap_used TEXT, disk_total TEXT, disk_used TEXT, processes TEXT, tcp_conn TEXT, udp_conn TEXT
+    swap_used TEXT, disk_total TEXT, disk_used TEXT, processes TEXT, tcp_conn TEXT, udp_conn TEXT,
+    ping_ct TEXT, ping_cu TEXT, ping_cm TEXT, ping_bd TEXT
   );
-
   CREATE TABLE IF NOT EXISTS ip_reports (
     id TEXT PRIMARY KEY, server_id TEXT, created_at INTEGER, report_text TEXT
   );
 `);
 
-// 数据库热更新：自动追加三网延迟字段
+// 数据库热更新 (兼容旧版字段)
 try {
     db.exec("ALTER TABLE servers ADD COLUMN ping_ct TEXT DEFAULT '0'");
     db.exec("ALTER TABLE servers ADD COLUMN ping_cu TEXT DEFAULT '0'");
@@ -85,34 +90,97 @@ const getSysSettings = () => {
     return sys;
 };
 
-const checkAuth = (req) => {
-    let token = '';
-    if (req.headers.authorization) {
-        const parts = req.headers.authorization.split(' ');
-        if (parts[0] === 'Basic' && parts[1]) {
-            const decoded = Buffer.from(parts[1], 'base64').toString('utf-8');
-            token = decoded.split(':')[1];
-        }
-    } else if (req.query && req.query.token) {
-        token = req.query.token;
-    }
-    return token === API_SECRET;
+// ==========================================
+// GitHub OAuth 核心逻辑
+// ==========================================
+const parseCookies = (request) => {
+    const list = {};
+    const rc = request.headers.cookie;
+    rc && rc.split(';').forEach(cookie => {
+        const parts = cookie.split('=');
+        list[parts.shift().trim()] = decodeURI(parts.join('='));
+    });
+    return list;
 };
 
-const requireAuth = (req, res, next) => {
-    if (!checkAuth(req)) {
-        res.setHeader('WWW-Authenticate', 'Basic realm="Admin Area"');
-        return res.status(401).send('Unauthorized');
+const checkWebAuth = (req) => {
+    const cookies = parseCookies(req);
+    const token = cookies['admin_session'];
+    if (!token) return false;
+    const session = db.prepare('SELECT * FROM sessions WHERE token = ?').get(token);
+    if (session && (Date.now() - session.created_at < 7 * 24 * 3600 * 1000)) {
+        return true; // Token 有效期 7 天
+    }
+    return false;
+};
+
+const requireWebAuth = (req, res, next) => {
+    if (!checkWebAuth(req)) {
+        if (req.path.startsWith('/admin/api')) {
+            return res.status(401).json({ error: 'Unauthorized' });
+        }
+        return res.redirect('/auth/github'); // 跳转到授权页面
     }
     next();
 };
+
+app.get('/auth/github', (req, res) => {
+    if (!GITHUB_CLIENT_ID) return res.send('系统未配置 GitHub Client ID 环境变量！');
+    res.redirect(`https://github.com/login/oauth/authorize?client_id=${GITHUB_CLIENT_ID}`);
+});
+
+app.get('/auth/github/callback', async (req, res) => {
+    const code = req.query.code;
+    if (!code) return res.send('授权失败：未提供 Code');
+
+    try {
+        // 用 Code 换取 Access Token
+        const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({ client_id: GITHUB_CLIENT_ID, client_secret: GITHUB_CLIENT_SECRET, code: code })
+        });
+        const tokenData = await tokenRes.json();
+        if (tokenData.error) return res.send('GitHub Auth Error: ' + tokenData.error_description);
+
+        // 获取 GitHub 用户信息
+        const userRes = await fetch('https://api.github.com/user', {
+            headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'User-Agent': 'Server-Monitor-Pro' }
+        });
+        const userData = await userRes.json();
+        const username = (userData.login || '').toLowerCase();
+
+        // 校验用户是否在白名单中
+        if (GITHUB_ALLOWED_USERS.length > 0 && !GITHUB_ALLOWED_USERS.includes(username)) {
+            return res.status(403).send(`<h2>❌ 拒绝访问</h2><p>您的 GitHub 账号 (@${username}) 不在系统白名单中。</p><a href="/">返回首页</a>`);
+        }
+
+        // 签发 Cookie Token
+        const sessionToken = crypto.randomBytes(32).toString('hex');
+        db.prepare('INSERT INTO sessions (token, username, created_at) VALUES (?, ?, ?)').run(sessionToken, username, Date.now());
+
+        res.cookie('admin_session', sessionToken, { maxAge: 7 * 24 * 3600 * 1000, httpOnly: true });
+        res.redirect('/admin');
+    } catch (err) {
+        res.status(500).send('Authentication failed.');
+    }
+});
+
+app.get('/logout', (req, res) => {
+    const cookies = parseCookies(req);
+    const token = cookies['admin_session'];
+    if (token) db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+    res.clearCookie('admin_session');
+    res.redirect('/');
+});
+
 
 // ==========================================
 // WebSocket Web SSH 终端逻辑
 // ==========================================
 app.ws('/ssh', (ws, req) => {
-    if (!checkAuth(req)) {
-        ws.send(JSON.stringify({ type: 'error', msg: 'Unauthorized' }));
+    if (!checkWebAuth(req)) {
+        ws.send(JSON.stringify({ type: 'error', msg: '会话已过期，请刷新页面重新授权登录！' }));
         ws.close();
         return;
     }
@@ -192,7 +260,7 @@ const checkOfflineNodes = async () => {
 };
 
 // ==========================================
-// 前端 UI 样式组件 (加入延迟框样式)
+// 前端 UI 样式组件 
 // ==========================================
 const getThemeStyles = (sys) => `
     body.theme2 { background-color: #0d1117; color: #c9d1d9; }
@@ -258,7 +326,7 @@ const footerHtml = `
 // 路由控制器
 // ==========================================
 
-app.post('/admin/api', requireAuth, (req, res) => {
+app.post('/admin/api', requireWebAuth, (req, res) => {
     try {
         const data = req.body;
         if (data.action === 'save_settings') {
@@ -288,7 +356,7 @@ app.post('/admin/api', requireAuth, (req, res) => {
 });
 
 // 后台渲染 UI
-app.get('/admin', requireAuth, (req, res) => {
+app.get('/admin', requireWebAuth, (req, res) => {
     const sys = getSysSettings();
     const results = db.prepare('SELECT id, name, last_updated, server_group, price, expire_date, bandwidth, traffic_limit FROM servers').all();
     const now = Date.now();
@@ -335,7 +403,7 @@ app.get('/admin', requireAuth, (req, res) => {
         table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px; }
         th, td { border: 1px solid #eee; padding: 12px; text-align: left; }
         th { background: #f8f9fa; }
-        .btn { cursor: pointer; border-radius: 4px; font-size: 13px; transition: opacity 0.2s; border: none; padding: 6px 10px; color: white; margin-left: 5px; }
+        .btn { cursor: pointer; border-radius: 4px; font-size: 13px; transition: opacity 0.2s; border: none; padding: 6px 10px; color: white; margin-left: 5px; text-decoration: none;}
         .btn:hover { opacity: 0.8; }
         .btn-blue { background: #3b82f6; } .btn-green { background: #10b981; } .btn-red { background: #ef4444; } .btn-gray { background: #6b7280; } .btn-purple { background: #8b5cf6; }
         .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
@@ -360,6 +428,7 @@ app.get('/admin', requireAuth, (req, res) => {
     </head>
     <body>
       <div class="card">
+        <a href="/logout" class="btn btn-red" style="position: absolute; right: 180px; top: 25px; font-weight: bold; padding: 8px 15px;">退出登录</a>
         <button onclick="openCalcModal()" class="btn btn-purple" style="position: absolute; right: 25px; top: 25px; font-weight: bold; padding: 8px 15px;">🧮 剩余价值计算器</button>
         <h2>🛠️ 全局设置</h2>
         <div class="settings-grid">
@@ -388,7 +457,7 @@ app.get('/admin', requireAuth, (req, res) => {
           </div>
           <div>
             <label style="font-size: 14px; font-weight: 600; margin-bottom: 10px; display: block; color: #555;">👁️ 前台展示控制</label>
-            <div class="checkbox-group"><input type="checkbox" id="cfg_is_public" ${sys.is_public === 'true' ? 'checked' : ''}><label><b>公开访问</b> (取消勾选后必须输入密码)</label></div>
+            <div class="checkbox-group"><input type="checkbox" id="cfg_is_public" ${sys.is_public === 'true' ? 'checked' : ''}><label><b>公开访问</b> (取消勾选后必须通过 GitHub 登录)</label></div>
             <div class="checkbox-group"><input type="checkbox" id="cfg_show_price" ${sys.show_price === 'true' ? 'checked' : ''}><label>显示 <b>价格</b></label></div>
             <div class="checkbox-group"><input type="checkbox" id="cfg_show_expire" ${sys.show_expire === 'true' ? 'checked' : ''}><label>显示 <b>到期时间</b></label></div>
             <div class="checkbox-group"><input type="checkbox" id="cfg_show_bw" ${sys.show_bw === 'true' ? 'checked' : ''}><label>显示 <b>带宽徽章</b></label></div>
@@ -510,8 +579,6 @@ app.get('/admin', requireAuth, (req, res) => {
       ${footerHtml}
 
       <script>
-        const API_SECRET = '${API_SECRET}'; 
-
         function uploadBg(input) {
           const file = input.files[0];
           if(!file) return;
@@ -562,7 +629,7 @@ app.get('/admin', requireAuth, (req, res) => {
         function copyCmd(id) {
           const input = document.getElementById('cmd-' + id);
           input.select(); document.execCommand('copy');
-          alert('✅ 一键命令已复制！覆盖安装即可生效最新脚本环境（含三网延迟功能）。');
+          alert('✅ 一键命令已复制！覆盖安装即可生效最新脚本环境。');
         }
 
         function openEditModal(id, group, price, expire, bw, traffic) {
@@ -588,43 +655,28 @@ app.get('/admin', requireAuth, (req, res) => {
           if (res.ok) location.reload(); else alert('保存失败');
         }
 
-        // ==============================
-        // 剩余价值计算器逻辑
-        // ==============================
         function openCalcModal() { document.getElementById('calcModal').style.display = 'block'; }
-
         function calculateValue() {
             const price = parseFloat(document.getElementById('calcPrice').value);
             const cycle = parseInt(document.getElementById('calcCycle').value);
             const expireDate = new Date(document.getElementById('calcExpire').value);
             const premium = parseFloat(document.getElementById('calcPremium').value) || 0;
-            
             if (isNaN(price) || isNaN(expireDate.getTime())) return alert('请填写正确的金额和到期日期！');
-
             const remainDays = Math.ceil((expireDate.getTime() - new Date().getTime()) / (1000 * 3600 * 24));
             if (remainDays <= 0) return alert('该机器已到期，剩余价值为 0');
-
             const dailyPrice = price / cycle;
             const finalPrice = (dailyPrice * remainDays) + premium;
-
             document.getElementById('resDays').innerText = remainDays;
             document.getElementById('resDaily').innerText = dailyPrice.toFixed(4);
             document.getElementById('resFinal').innerText = Math.max(0, finalPrice).toFixed(2);
             document.getElementById('calcResult').style.display = 'block';
         }
 
-        // ==============================
-        // IP 质量历史监控逻辑
-        // ==============================
-        let ipHistoryTerm, ipHistoryFit;
-        let currentIpHistory = [];
-        let currentIpServerId = '';
-
+        let ipHistoryTerm, ipHistoryFit, currentIpHistory = [], currentIpServerId = '';
         async function openIpHistoryModal(id, name) {
             currentIpServerId = id;
             document.getElementById('ipHistoryTargetName').innerText = name;
             document.getElementById('ipHistoryModal').style.display = 'block';
-            
             if (!ipHistoryTerm) {
                 ipHistoryTerm = new Terminal({ convertEol: true, theme: { background: '#000' } });
                 ipHistoryFit = new FitAddon.FitAddon();
@@ -634,48 +686,35 @@ app.get('/admin', requireAuth, (req, res) => {
             setTimeout(() => ipHistoryFit.fit(), 100);
             await refreshIpHistory();
         }
-
         async function refreshIpHistory() {
             ipHistoryTerm.clear();
             ipHistoryTerm.writeln('\\x1b[33m正在拉取 IP 质量体检记录...\\x1b[0m');
-            
             const res = await fetch('/api/ip-history?id=' + currentIpServerId);
             currentIpHistory = await res.json();
-            
             const select = document.getElementById('ipHistorySelect');
             select.innerHTML = '';
-            
             if (currentIpHistory.length === 0) {
                 ipHistoryTerm.clear();
                 ipHistoryTerm.writeln('\\x1b[31m暂无 IP 质量体检记录。\\x1b[0m');
-                ipHistoryTerm.writeln('\\r\\n说明：重新复制安装命令到被控机执行即可配置定时检测。');
                 return;
             }
-            
             currentIpHistory.forEach((item, index) => {
                 const opt = document.createElement('option');
-                opt.value = index;
-                opt.text = new Date(item.created_at).toLocaleString();
+                opt.value = index; opt.text = new Date(item.created_at).toLocaleString();
                 select.appendChild(opt);
             });
             renderIpReport(0);
         }
-
         function renderIpReport(index) {
             if(!currentIpHistory[index]) return;
             ipHistoryTerm.clear();
             ipHistoryTerm.write(currentIpHistory[index].report_text);
         }
 
-        // ==============================
-        // Web SSH 终端逻辑
-        // ==============================
         let term, fitAddon, ws;
-
         function openSshModal(name) {
             document.getElementById('sshTargetName').innerText = name;
             document.getElementById('sshModal').style.display = 'block';
-            
             if (!term) {
                 term = new Terminal({ cursorBlink: true, theme: { background: '#000' } });
                 fitAddon = new FitAddon.FitAddon();
@@ -686,32 +725,26 @@ app.get('/admin', requireAuth, (req, res) => {
                 term.writeln('Please enter credentials and click Connect.');
             }
         }
-
         function closeSshModal() {
             document.getElementById('sshModal').style.display = 'none';
             if (ws && ws.readyState === WebSocket.OPEN) ws.close();
         }
-
         function connectSsh() {
             const host = document.getElementById('sshHost').value;
             const port = document.getElementById('sshPort').value;
             const username = document.getElementById('sshUser').value;
             const password = document.getElementById('sshPass').value;
-
             if (!host || !password) return alert('请输入IP和密码');
-
             if (ws) ws.close();
             term.reset();
             term.writeln('\\x1b[33mConnecting to ' + host + '...\\x1b[0m');
-
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            ws = new WebSocket(protocol + '//' + location.host + '/ssh?token=' + API_SECRET);
-
+            // WS 通过 Cookie 自动鉴权，不再需要传 ?token=...
+            ws = new WebSocket(protocol + '//' + location.host + '/ssh');
             ws.onopen = () => {
                 ws.send(JSON.stringify({ type: 'connect', host, port, username, password }));
                 term.onData(data => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'data', data })); });
             };
-
             ws.onmessage = (event) => {
                 const msg = JSON.parse(event.data);
                 if (msg.type === 'data') term.write(msg.data);
@@ -720,23 +753,17 @@ app.get('/admin', requireAuth, (req, res) => {
             };
             ws.onclose = () => { term.writeln('\\r\\n\\x1b[31mConnection closed.\\x1b[0m'); };
         }
-
         function sendCmd(cmd) {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'data', data: cmd }));
-                term.focus();
-            } else {
-                alert('请先连接服务器！');
-            }
+            if (ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify({ type: 'data', data: cmd })); term.focus(); } 
+            else { alert('请先连接服务器！'); }
         }
-
       </script>
     </body>
     </html>`;
     res.send(html);
 });
 
-// 一键安装脚本 (包含三网延迟检测模块)
+// 一键安装脚本 (不变，仍使用 API_SECRET 作为探针通信密钥)
 app.get('/install.sh', (req, res) => {
     const host = `${req.protocol}://${req.get('host')}`;
     const bashScript = `#!/bin/bash
@@ -750,7 +777,6 @@ echo "开始安装探针 Agent 及 增强组件 (包含三网延迟监测)..."
 systemctl stop cf-probe.service 2>/dev/null
 pkill -f cf-probe.sh 2>/dev/null
 
-# 1. 写入探针主脚本
 cat << 'EOF' > /usr/local/bin/cf-probe.sh
 #!/bin/bash
 SERVER_ID="$1"
@@ -760,7 +786,6 @@ WORKER_URL="$3"
 get_net_bytes() { awk 'NR>2 {rx+=$2; tx+=$10} END {printf "%.0f %.0f", rx, tx}' /proc/net/dev; }
 get_cpu_stat() { awk '/^cpu / {print $2+$3+$4+$5+$6+$7+$8+$9, $5+$6}' /proc/stat; }
 
-# 三网延迟检测工具函数 (通过字节跳动边缘节点)
 CT_NODES=("bj-ct-dualstack.ip.zstaticcdn.com" "sh-ct-dualstack.ip.zstaticcdn.com" "gd-ct-dualstack.ip.zstaticcdn.com")
 CU_NODES=("bj-cu-dualstack.ip.zstaticcdn.com" "sh-cu-dualstack.ip.zstaticcdn.com" "gd-cu-dualstack.ip.zstaticcdn.com")
 CM_NODES=("bj-cm-dualstack.ip.zstaticcdn.com" "sh-cm-dualstack.ip.zstaticcdn.com" "gd-cm-dualstack.ip.zstaticcdn.com")
@@ -790,7 +815,6 @@ while true; do
     curl -s -6 -m 3 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q "ip=" && IPV6="1" || IPV6="0"
   fi
   
-  # 随机抽取池中节点进行测速，形成全国平均连通率
   if [ $((LOOP_COUNT % 6)) -eq 0 ]; then
     PING_CT=\$(get_http_ping "\${CT_NODES[\$RANDOM % \${#CT_NODES[@]}]}")
     PING_CU=\$(get_http_ping "\${CU_NODES[\$RANDOM % \${#CU_NODES[@]}]}")
@@ -846,7 +870,6 @@ while true; do
   TX_SPEED=$(((TX_NOW - TX_PREV) / 5))
   RX_PREV=$RX_NOW; TX_PREV=$TX_NOW
   
-  # Payload 加入四重延迟指标
   PAYLOAD="{\\"id\\": \\"$SERVER_ID\\", \\"secret\\": \\"$SECRET\\", \\"metrics\\": { \\"cpu\\": \\"$CPU\\", \\"ram\\": \\"$RAM\\", \\"ram_total\\": \\"$RAM_TOTAL\\", \\"ram_used\\": \\"$RAM_USED\\", \\"swap_total\\": \\"$SWAP_TOTAL\\", \\"swap_used\\": \\"$SWAP_USED\\", \\"disk\\": \\"$DISK\\", \\"disk_total\\": \\"$DISK_TOTAL\\", \\"disk_used\\": \\"$DISK_USED\\", \\"load\\": \\"$LOAD\\", \\"uptime\\": \\"$UPTIME\\", \\"boot_time\\": \\"$BOOT_TIME\\", \\"net_rx\\": \\"$RX_NOW\\", \\"net_tx\\": \\"$TX_NOW\\", \\"net_in_speed\\": \\"$RX_SPEED\\", \\"net_out_speed\\": \\"$TX_SPEED\\", \\"os\\": \\"$OS\\", \\"arch\\": \\"$ARCH\\", \\"cpu_info\\": \\"$CPU_INFO\\", \\"processes\\": \\"$PROCESSES\\", \\"tcp_conn\\": \\"$TCP_CONN\\", \\"udp_conn\\": \\"$UDP_CONN\\", \\"ip_v4\\": \\"$IPV4\\", \\"ip_v6\\": \\"$IPV6\\", \\"ping_ct\\": \\"$PING_CT\\", \\"ping_cu\\": \\"$PING_CU\\", \\"ping_cm\\": \\"$PING_CM\\", \\"ping_bd\\": \\"$PING_BD\\" }}"
   
   curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$WORKER_URL" > /dev/null
@@ -854,7 +877,6 @@ while true; do
 done
 EOF
 
-# 2. 写入 IP 体检脚本
 cat << 'EOF' > /usr/local/bin/cf-ip-check.sh
 #!/bin/bash
 SERVER_ID="$1"
@@ -869,32 +891,21 @@ PAYLOAD="{\"id\": \"$SERVER_ID\", \"secret\": \"$SECRET\", \"report_b64\": \"$RE
 curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$WORKER_URL" > /dev/null
 EOF
 
-# 3. 写入 原生防送中/IP洗白 脚本
 cat << 'EOF' > /usr/local/bin/cf-ip-warm.sh
 #!/bin/bash
 echo -e "\e[33m[IP 养护] 正在初始化原生防送中探测序列...\e[0m"
-
 UAS=(
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 )
-
 KEYWORDS=("weather" "local+news" "amazon" "netflix" "speedtest" "restaurant+near+me" "buy+shoes+online" "maps")
-
 RAND_UA=${UAS[$RANDOM % ${#UAS[@]}]}
 RAND_KW=${KEYWORDS[$RANDOM % ${#KEYWORDS[@]}]}
 
-echo -e "\e[36m[*] 伪装指纹:\e[0m $RAND_UA"
-echo -e "\e[36m[*] 注入坐标行为:\e[0m 搜索 '$RAND_KW'"
-
 curl -sL -A "$RAND_UA" -H "Accept-Language: en-US,en;q=0.9" "https://www.google.com/search?q=$RAND_KW" > /dev/null
-SLEEP_TIME=$((RANDOM % 5 + 2))
-echo -e "\e[36m[*] 休眠 ${SLEEP_TIME} 秒模拟阅读...\e[0m"
-sleep $SLEEP_TIME
-
+sleep $((RANDOM % 5 + 2))
 curl -sL -A "$RAND_UA" "https://www.youtube.com/results?search_query=$RAND_KW" > /dev/null
-
 echo -e "\e[32m[IP 养护] 探测完成，已成功向全球数据库注入活跃本地信号！\e[0m"
 EOF
 
@@ -902,7 +913,6 @@ chmod +x /usr/local/bin/cf-probe.sh
 chmod +x /usr/local/bin/cf-ip-check.sh
 chmod +x /usr/local/bin/cf-ip-warm.sh
 
-# 4. 注册探针守护进程
 cat << EOF > /etc/systemd/system/cf-probe.service
 [Unit]
 Description=Server Monitor Probe Agent
@@ -921,18 +931,18 @@ systemctl daemon-reload
 systemctl enable cf-probe.service
 systemctl restart cf-probe.service
 
-# 5. 配置双路 Cron
 RAND_MIN=$((RANDOM % 60))
 (crontab -l 2>/dev/null | grep -v "cf-ip-check.sh" | grep -v "cf-ip-warm.sh" ; echo "$RAND_MIN 4 * * * /usr/local/bin/cf-ip-check.sh $SERVER_ID $SECRET ${host}/update-ip" ; echo "$RAND_MIN */6 * * * /usr/local/bin/cf-ip-warm.sh > /dev/null 2>&1") | crontab -
 
 nohup /usr/local/bin/cf-ip-check.sh $SERVER_ID $SECRET "${host}/update-ip" > /dev/null 2>&1 &
 
-echo "✅ 探针及增强模块(三网延迟/IP历史)全部安装成功！"
+echo "✅ 探针及增强模块全部安装成功！"
 `;
     res.setHeader('Content-Type', 'text/plain;charset=UTF-8');
     res.send(bashScript);
 });
 
+// 数据上报接口 (保留使用 API_SECRET 验证)
 app.post('/update', (req, res) => {
     try {
         const { id, secret, metrics } = req.body;
@@ -1001,8 +1011,8 @@ app.post('/update-ip', (req, res) => {
 
 app.get('/api/server', (req, res) => {
     const sys = getSysSettings();
-    if (sys.is_public !== 'true' && !checkAuth(req)) {
-        res.setHeader('WWW-Authenticate', 'Basic realm="Secure Area"');
+    // 接口层也采用 WebAuth 进行防刷保护
+    if (sys.is_public !== 'true' && !checkWebAuth(req)) {
         return res.status(401).send('Unauthorized');
     }
     const id = req.query.id;
@@ -1012,19 +1022,18 @@ app.get('/api/server', (req, res) => {
     res.json(server);
 });
 
-app.get('/api/ip-history', requireAuth, (req, res) => {
+app.get('/api/ip-history', requireWebAuth, (req, res) => {
     const id = req.query.id;
     if (!id) return res.status(400).send('Miss ID');
     const history = db.prepare('SELECT created_at, report_text FROM ip_reports WHERE server_id = ? ORDER BY created_at DESC').all();
     res.json(history);
 });
 
-// 前台大盘展示与详情页 (已集成三网延迟模块)
+// 前台大盘展示与详情页
 app.get('/', (req, res) => {
     const sys = getSysSettings();
-    if (sys.is_public !== 'true' && !checkAuth(req)) {
-        res.setHeader('WWW-Authenticate', 'Basic realm="Secure Area"');
-        return res.status(401).send('Unauthorized');
+    if (sys.is_public !== 'true' && !checkWebAuth(req)) {
+        return res.redirect('/auth/github'); // 跳转到 GitHub 登录
     }
 
     const viewId = req.query.id;
@@ -1104,7 +1113,6 @@ app.get('/', (req, res) => {
             const ctxNet = document.getElementById('chartNet').getContext('2d'); charts.net = new Chart(ctxNet, { type: 'line', data: { labels: Array(30).fill(''), datasets: [ { label: 'In', data: Array(30).fill(0), borderColor: '#10b981', borderWidth: 2, tension: 0.4, pointRadius: 0 }, { label: 'Out', data: Array(30).fill(0), borderColor: '#3b82f6', borderWidth: 2, tension: 0.4, pointRadius: 0 } ]}, options: commonOptions });
             const ctxConn = document.getElementById('chartConn').getContext('2d'); charts.conn = new Chart(ctxConn, { type: 'line', data: { labels: Array(30).fill(''), datasets: [ { label: 'TCP', data: Array(30).fill(0), borderColor: '#6366f1', borderWidth: 2, tension: 0.4, pointRadius: 0 }, { label: 'UDP', data: Array(30).fill(0), borderColor: '#d946ef', borderWidth: 2, tension: 0.4, pointRadius: 0 } ]}, options: commonOptions });
             
-            // 初始化四线延迟图表
             const ctxPing = document.getElementById('chartPing').getContext('2d');
             charts.ping = new Chart(ctxPing, {
                 type: 'line',
@@ -1136,7 +1144,6 @@ app.get('/', (req, res) => {
                 let diskTotal = parseFloat(data.disk_total) || 0; let diskUsed = parseFloat(data.disk_used) || 0; let diskPct = parseInt(data.disk) || 0;
                 document.getElementById('text-disk').innerText = diskPct + '%'; document.getElementById('disk-bar').style.width = diskPct + '%'; document.getElementById('text-disk-detail').innerText = (diskUsed/1024).toFixed(2) + ' GiB / ' + (diskTotal/1024).toFixed(2) + ' GiB';
                 
-                // 动态更新延迟文本和图表
                 document.getElementById('t-ct').innerText = data.ping_ct + 'ms';
                 document.getElementById('t-cu').innerText = data.ping_cu + 'ms';
                 document.getElementById('t-cm').innerText = data.ping_cm + 'ms';
@@ -1185,7 +1192,6 @@ app.get('/', (req, res) => {
         }
     }
 
-    // 延迟颜色计算逻辑
     const getColor = (ping) => {
         const p = parseInt(ping);
         if (p === 0 || isNaN(p)) return '#9ca3af'; 
@@ -1232,7 +1238,6 @@ app.get('/', (req, res) => {
                 if (server.ip_v4 === '1') badgesHtml += `<span class="badge badge-v4">IPv4</span>`;
                 if (server.ip_v6 === '1') badgesHtml += `<span class="badge badge-v6">IPv6</span>`;
 
-                // 注入三网延迟 HTML
                 const pingHtml = `
                     <div class="ping-box">
                         <span>电信 <span style="color:${getColor(server.ping_ct)}; font-weight:bold;">${server.ping_ct === '0' ? '超时' : server.ping_ct + 'ms'}</span></span>
