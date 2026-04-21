@@ -25,7 +25,7 @@ if (!fs.existsSync(dbDir)) {
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 
-// 初始化所有数据表
+// 初始化表结构
 db.exec(`
   CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
   
@@ -39,12 +39,17 @@ db.exec(`
   );
 
   CREATE TABLE IF NOT EXISTS ip_reports (
-    id TEXT PRIMARY KEY,
-    server_id TEXT,
-    created_at INTEGER,
-    report_text TEXT
+    id TEXT PRIMARY KEY, server_id TEXT, created_at INTEGER, report_text TEXT
   );
 `);
+
+// 数据库热更新：自动追加三网延迟字段
+try {
+    db.exec("ALTER TABLE servers ADD COLUMN ping_ct TEXT DEFAULT '0'");
+    db.exec("ALTER TABLE servers ADD COLUMN ping_cu TEXT DEFAULT '0'");
+    db.exec("ALTER TABLE servers ADD COLUMN ping_cm TEXT DEFAULT '0'");
+    db.exec("ALTER TABLE servers ADD COLUMN ping_bd TEXT DEFAULT '0'");
+} catch (e) {}
 
 // ==========================================
 // 工具函数与全局配置
@@ -111,7 +116,6 @@ app.ws('/ssh', (ws, req) => {
         ws.close();
         return;
     }
-
     const conn = new Client();
     let streamObj = null;
 
@@ -127,15 +131,10 @@ app.ws('/ssh', (ws, req) => {
                             return;
                         }
                         streamObj = stream;
-                        
-                        stream.on('data', (d) => {
-                            ws.send(JSON.stringify({ type: 'data', data: d.toString('utf-8') }));
-                        });
-                        
+                        stream.on('data', (d) => ws.send(JSON.stringify({ type: 'data', data: d.toString('utf-8') })));
                         stream.on('close', () => {
                             ws.send(JSON.stringify({ type: 'status', msg: '\r\n🔌 SSH 连接已断开。\r\n' }));
-                            conn.end();
-                            ws.close();
+                            conn.end(); ws.close();
                         });
                     });
                 }).on('error', (err) => {
@@ -143,25 +142,14 @@ app.ws('/ssh', (ws, req) => {
                 }).on('keyboard-interactive', (name, instructions, instructionsLang, prompts, finish) => {
                     finish([data.password]);
                 }).connect({
-                    host: data.host,
-                    port: data.port || 22,
-                    username: data.username || 'root',
-                    password: data.password,
-                    tryKeyboard: true
+                    host: data.host, port: data.port || 22, username: data.username || 'root',
+                    password: data.password, tryKeyboard: true
                 });
-            } else if (data.type === 'data' && streamObj) {
-                streamObj.write(data.data);
-            } else if (data.type === 'resize' && streamObj) {
-                streamObj.setWindow(data.rows, data.cols, 800, 600);
-            }
-        } catch (e) {
-            console.error('WS Error:', e);
-        }
+            } else if (data.type === 'data' && streamObj) streamObj.write(data.data);
+            else if (data.type === 'resize' && streamObj) streamObj.setWindow(data.rows, data.cols, 800, 600);
+        } catch (e) {}
     });
-
-    ws.on('close', () => {
-        conn.end();
-    });
+    ws.on('close', () => conn.end());
 });
 
 // ==========================================
@@ -171,8 +159,7 @@ const sendTelegram = async (sys, msg) => {
     if (sys.tg_notify !== 'true' || !sys.tg_bot_token || !sys.tg_chat_id) return;
     try {
         await fetch(`https://api.telegram.org/bot${sys.tg_bot_token}/sendMessage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ chat_id: sys.tg_chat_id, text: msg, parse_mode: 'HTML' })
         });
     } catch (e) {}
@@ -191,28 +178,21 @@ const checkOfflineNodes = async () => {
         const now = Date.now();
 
         for (const s of allServers) {
-            const diff = now - s.last_updated;
-            const isOffline = diff > 120000;
-
+            const isOffline = (now - s.last_updated) > 120000;
             if (isOffline && !alertState[s.id]) {
                 await sendTelegram(sys, `⚠️ <b>节点离线告警</b>\n\n<b>节点名称:</b> ${s.name}\n<b>状态:</b> 离线 (超过2分钟未上报)\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}`);
-                alertState[s.id] = true;
-                stateChanged = true;
+                alertState[s.id] = true; stateChanged = true;
             } else if (!isOffline && alertState[s.id]) {
                 await sendTelegram(sys, `✅ <b>节点恢复通知</b>\n\n<b>节点名称:</b> ${s.name}\n<b>状态:</b> 恢复在线\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}`);
-                delete alertState[s.id];
-                stateChanged = true;
+                delete alertState[s.id]; stateChanged = true;
             }
         }
-
-        if (stateChanged) {
-            db.prepare('INSERT INTO settings (key, value) VALUES ("alert_state", ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(JSON.stringify(alertState));
-        }
+        if (stateChanged) db.prepare('INSERT INTO settings (key, value) VALUES ("alert_state", ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(JSON.stringify(alertState));
     } catch (e) {}
 };
 
 // ==========================================
-// 前端 UI 样式组件
+// 前端 UI 样式组件 (加入延迟框样式)
 // ==========================================
 const getThemeStyles = (sys) => `
     body.theme2 { background-color: #0d1117; color: #c9d1d9; }
@@ -255,19 +235,11 @@ const getThemeStyles = (sys) => `
     .theme5 .badge-bw { background: #f0f; box-shadow: 0 0 5px #f0f; }
     .theme5 .badge-tf { background: #0ff; color:#000; box-shadow: 0 0 5px #0ff; }
 
+    .ping-box { font-size:11px; margin-top:10px; display:flex; gap:10px; padding: 6px 8px; border-radius: 4px; flex-wrap:wrap; background: rgba(150,150,150,0.1); border: 1px solid rgba(150,150,150,0.2); }
+
     ${sys.custom_bg ? `
-      body {
-        background: url('${sys.custom_bg}') no-repeat center center fixed !important;
-        background-size: cover !important;
-      }
-      .vps-card, .global-stats, .header-card, .chart-card {
-        background: rgba(255, 255, 255, 0.4) !important; 
-        backdrop-filter: blur(12px) !important;
-        -webkit-backdrop-filter: blur(12px) !important;
-        border: 1px solid rgba(255, 255, 255, 0.6) !important;
-        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.1) !important;
-        color: #111 !important;
-      }
+      body { background: url('${sys.custom_bg}') no-repeat center center fixed !important; background-size: cover !important; }
+      .vps-card, .global-stats, .header-card, .chart-card { background: rgba(255, 255, 255, 0.4) !important; backdrop-filter: blur(12px) !important; -webkit-backdrop-filter: blur(12px) !important; border: 1px solid rgba(255, 255, 255, 0.6) !important; box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.1) !important; color: #111 !important; }
       .vps-card:hover { background: rgba(255, 255, 255, 0.6) !important; transform: translateY(-3px); }
       .group-header { color: #fff !important; text-shadow: 0 2px 5px rgba(0,0,0,0.6) !important; border-left-color: #fff !important; }
       .stat-val, .g-val, .card-title { color: #000 !important; font-weight: 800 !important; }
@@ -291,19 +263,16 @@ app.post('/admin/api', requireAuth, (req, res) => {
         const data = req.body;
         if (data.action === 'save_settings') {
             const stmt = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
-            db.transaction(() => {
-                for (const [k, v] of Object.entries(data.settings)) stmt.run(k, v);
-            })();
+            db.transaction(() => { for (const [k, v] of Object.entries(data.settings)) stmt.run(k, v); })();
             res.json({ success: true });
         } 
         else if (data.action === 'add') {
             const id = crypto.randomUUID();
-            const name = data.name || 'New Server';
             db.prepare(`
                 INSERT INTO servers 
-                (id, name, cpu, ram, disk, load_avg, uptime, last_updated, ram_total, net_rx, net_tx, net_in_speed, net_out_speed, os, cpu_info, country, server_group, price, expire_date, bandwidth, traffic_limit, ip_v4, ip_v6) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `).run(id, name, '0', '0', '0', '0', '0', 0, '0', '0', '0', '0', '0', '', '', '', '默认分组', '免费', '', '', '', '0', '0');
+                (id, name, cpu, ram, disk, load_avg, uptime, last_updated, ram_total, net_rx, net_tx, net_in_speed, net_out_speed, os, cpu_info, country, server_group, price, expire_date, bandwidth, traffic_limit, ip_v4, ip_v6, ping_ct, ping_cu, ping_cm, ping_bd) 
+                VALUES (?, ?, '0', '0', '0', '0', '0', 0, '0', '0', '0', '0', '0', '', '', '', '默认分组', '免费', '', '', '', '0', '0', '0', '0', '0', '0')
+            `).run(id, data.name || 'New Server');
             res.json({ success: true });
         } 
         else if (data.action === 'delete') {
@@ -311,14 +280,11 @@ app.post('/admin/api', requireAuth, (req, res) => {
             res.json({ success: true });
         } 
         else if (data.action === 'edit') {
-            db.prepare(`
-                UPDATE servers SET server_group = ?, price = ?, expire_date = ?, bandwidth = ?, traffic_limit = ? WHERE id = ?
-            `).run(data.server_group || '默认分组', data.price || '', data.expire_date || '', data.bandwidth || '', data.traffic_limit || '', data.id);
+            db.prepare(`UPDATE servers SET server_group = ?, price = ?, expire_date = ?, bandwidth = ?, traffic_limit = ? WHERE id = ?`)
+              .run(data.server_group || '默认分组', data.price || '', data.expire_date || '', data.bandwidth || '', data.traffic_limit || '', data.id);
             res.json({ success: true });
         }
-    } catch (e) {
-        res.status(400).json({ error: e.message });
-    }
+    } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
 // 后台渲染 UI
@@ -533,9 +499,7 @@ app.get('/admin', requireAuth, (req, res) => {
             <button class="preset-btn" onclick="sendCmd('apt update && apt upgrade -y\\n')">🔄 更新系统</button>
             <button class="preset-btn" onclick="sendCmd('curl -sL yabs.sh | bash\\n')">🛠️ 综合测试 (yabs.sh)</button>
             <button class="preset-btn" onclick="sendCmd('/usr/local/bin/cf-ip-check.sh\\n')">🌐 手动跑IP监控</button>
-            
             <button class="preset-btn" style="background:#fef08a; border-color:#eab308; font-weight:bold; color:#854d0e;" onclick="sendCmd('/usr/local/bin/cf-ip-warm.sh\\n')">🛡️ 原生防送中/IP洗白</button>
-
             <button class="preset-btn" onclick="sendCmd('top\\n')">📊 查看 Top</button>
             <button class="preset-btn" onclick="sendCmd('df -h\\n')">💾 磁盘信息</button>
           </div>
@@ -598,7 +562,7 @@ app.get('/admin', requireAuth, (req, res) => {
         function copyCmd(id) {
           const input = document.getElementById('cmd-' + id);
           input.select(); document.execCommand('copy');
-          alert('✅ 一键命令已复制！覆盖安装即可生效最新脚本环境。');
+          alert('✅ 一键命令已复制！覆盖安装即可生效最新脚本环境（含三网延迟功能）。');
         }
 
         function openEditModal(id, group, price, expire, bw, traffic) {
@@ -772,7 +736,7 @@ app.get('/admin', requireAuth, (req, res) => {
     res.send(html);
 });
 
-// 一键安装脚本 (包含防送中原生洗白模块)
+// 一键安装脚本 (包含三网延迟检测模块)
 app.get('/install.sh', (req, res) => {
     const host = `${req.protocol}://${req.get('host')}`;
     const bashScript = `#!/bin/bash
@@ -781,7 +745,7 @@ SECRET=$2
 WORKER_URL="${host}/update"
 
 if [ -z "$SERVER_ID" ] || [ -z "$SECRET" ]; then echo "错误: 缺少参数。"; exit 1; fi
-echo "开始安装探针 Agent 及 增强组件..."
+echo "开始安装探针 Agent 及 增强组件 (包含三网延迟监测)..."
 
 systemctl stop cf-probe.service 2>/dev/null
 pkill -f cf-probe.sh 2>/dev/null
@@ -796,6 +760,16 @@ WORKER_URL="$3"
 get_net_bytes() { awk 'NR>2 {rx+=$2; tx+=$10} END {printf "%.0f %.0f", rx, tx}' /proc/net/dev; }
 get_cpu_stat() { awk '/^cpu / {print $2+$3+$4+$5+$6+$7+$8+$9, $5+$6}' /proc/stat; }
 
+# 三网延迟检测工具函数 (通过字节跳动边缘节点)
+CT_NODES=("bj-ct-dualstack.ip.zstaticcdn.com" "sh-ct-dualstack.ip.zstaticcdn.com" "gd-ct-dualstack.ip.zstaticcdn.com")
+CU_NODES=("bj-cu-dualstack.ip.zstaticcdn.com" "sh-cu-dualstack.ip.zstaticcdn.com" "gd-cu-dualstack.ip.zstaticcdn.com")
+CM_NODES=("bj-cm-dualstack.ip.zstaticcdn.com" "sh-cm-dualstack.ip.zstaticcdn.com" "gd-cm-dualstack.ip.zstaticcdn.com")
+
+get_http_ping() {
+  local rtt=\$(curl -o /dev/null -s -m 2 -w "%{time_total}" "http://\$1" 2>/dev/null | awk '{printf "%.0f", \$1*1000}')
+  echo "\${rtt:-0}"
+}
+
 NET_STAT=$(get_net_bytes)
 RX_PREV=$(echo $NET_STAT | awk '{print $1}')
 TX_PREV=$(echo $NET_STAT | awk '{print $2}')
@@ -808,12 +782,22 @@ PREV_CPU_IDLE=$(echo $CPU_STAT | awk '{print $2}')
 
 LOOP_COUNT=0
 IPV4="0"; IPV6="0"
+PING_CT="0"; PING_CU="0"; PING_CM="0"; PING_BD="0"
 
 while true; do
   if [ $((LOOP_COUNT % 60)) -eq 0 ]; then
     curl -s -4 -m 3 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q "ip=" && IPV4="1" || IPV4="0"
     curl -s -6 -m 3 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q "ip=" && IPV6="1" || IPV6="0"
   fi
+  
+  # 随机抽取池中节点进行测速，形成全国平均连通率
+  if [ $((LOOP_COUNT % 6)) -eq 0 ]; then
+    PING_CT=\$(get_http_ping "\${CT_NODES[\$RANDOM % \${#CT_NODES[@]}]}")
+    PING_CU=\$(get_http_ping "\${CU_NODES[\$RANDOM % \${#CU_NODES[@]}]}")
+    PING_CM=\$(get_http_ping "\${CM_NODES[\$RANDOM % \${#CM_NODES[@]}]}")
+    PING_BD=\$(get_http_ping "lf3-ips.zstaticcdn.com")
+  fi
+
   LOOP_COUNT=$((LOOP_COUNT + 1))
 
   OS=$(awk -F= '/^PRETTY_NAME/{print $2}' /etc/os-release | tr -d '"')
@@ -862,7 +846,8 @@ while true; do
   TX_SPEED=$(((TX_NOW - TX_PREV) / 5))
   RX_PREV=$RX_NOW; TX_PREV=$TX_NOW
   
-  PAYLOAD="{\\"id\\": \\"$SERVER_ID\\", \\"secret\\": \\"$SECRET\\", \\"metrics\\": { \\"cpu\\": \\"$CPU\\", \\"ram\\": \\"$RAM\\", \\"ram_total\\": \\"$RAM_TOTAL\\", \\"ram_used\\": \\"$RAM_USED\\", \\"swap_total\\": \\"$SWAP_TOTAL\\", \\"swap_used\\": \\"$SWAP_USED\\", \\"disk\\": \\"$DISK\\", \\"disk_total\\": \\"$DISK_TOTAL\\", \\"disk_used\\": \\"$DISK_USED\\", \\"load\\": \\"$LOAD\\", \\"uptime\\": \\"$UPTIME\\", \\"boot_time\\": \\"$BOOT_TIME\\", \\"net_rx\\": \\"$RX_NOW\\", \\"net_tx\\": \\"$TX_NOW\\", \\"net_in_speed\\": \\"$RX_SPEED\\", \\"net_out_speed\\": \\"$TX_SPEED\\", \\"os\\": \\"$OS\\", \\"arch\\": \\"$ARCH\\", \\"cpu_info\\": \\"$CPU_INFO\\", \\"processes\\": \\"$PROCESSES\\", \\"tcp_conn\\": \\"$TCP_CONN\\", \\"udp_conn\\": \\"$UDP_CONN\\", \\"ip_v4\\": \\"$IPV4\\", \\"ip_v6\\": \\"$IPV6\\" }}"
+  # Payload 加入四重延迟指标
+  PAYLOAD="{\\"id\\": \\"$SERVER_ID\\", \\"secret\\": \\"$SECRET\\", \\"metrics\\": { \\"cpu\\": \\"$CPU\\", \\"ram\\": \\"$RAM\\", \\"ram_total\\": \\"$RAM_TOTAL\\", \\"ram_used\\": \\"$RAM_USED\\", \\"swap_total\\": \\"$SWAP_TOTAL\\", \\"swap_used\\": \\"$SWAP_USED\\", \\"disk\\": \\"$DISK\\", \\"disk_total\\": \\"$DISK_TOTAL\\", \\"disk_used\\": \\"$DISK_USED\\", \\"load\\": \\"$LOAD\\", \\"uptime\\": \\"$UPTIME\\", \\"boot_time\\": \\"$BOOT_TIME\\", \\"net_rx\\": \\"$RX_NOW\\", \\"net_tx\\": \\"$TX_NOW\\", \\"net_in_speed\\": \\"$RX_SPEED\\", \\"net_out_speed\\": \\"$TX_SPEED\\", \\"os\\": \\"$OS\\", \\"arch\\": \\"$ARCH\\", \\"cpu_info\\": \\"$CPU_INFO\\", \\"processes\\": \\"$PROCESSES\\", \\"tcp_conn\\": \\"$TCP_CONN\\", \\"udp_conn\\": \\"$UDP_CONN\\", \\"ip_v4\\": \\"$IPV4\\", \\"ip_v6\\": \\"$IPV6\\", \\"ping_ct\\": \\"$PING_CT\\", \\"ping_cu\\": \\"$PING_CU\\", \\"ping_cm\\": \\"$PING_CM\\", \\"ping_bd\\": \\"$PING_BD\\" }}"
   
   curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$WORKER_URL" > /dev/null
   sleep 5
@@ -884,19 +869,17 @@ PAYLOAD="{\"id\": \"$SERVER_ID\", \"secret\": \"$SECRET\", \"report_b64\": \"$RE
 curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$WORKER_URL" > /dev/null
 EOF
 
-# 3. 【核心新增】写入 原生原生防送中/IP洗白 脚本
+# 3. 写入 原生防送中/IP洗白 脚本
 cat << 'EOF' > /usr/local/bin/cf-ip-warm.sh
 #!/bin/bash
 echo -e "\e[33m[IP 养护] 正在初始化原生防送中探测序列...\e[0m"
 
-# 随机用户代理池
 UAS=(
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 )
 
-# 随机搜索行为池
 KEYWORDS=("weather" "local+news" "amazon" "netflix" "speedtest" "restaurant+near+me" "buy+shoes+online" "maps")
 
 RAND_UA=${UAS[$RANDOM % ${#UAS[@]}]}
@@ -905,9 +888,7 @@ RAND_KW=${KEYWORDS[$RANDOM % ${#KEYWORDS[@]}]}
 echo -e "\e[36m[*] 伪装指纹:\e[0m $RAND_UA"
 echo -e "\e[36m[*] 注入坐标行为:\e[0m 搜索 '$RAND_KW'"
 
-# 模拟真实搜索请求
 curl -sL -A "$RAND_UA" -H "Accept-Language: en-US,en;q=0.9" "https://www.google.com/search?q=$RAND_KW" > /dev/null
-# 随机休眠防识别
 SLEEP_TIME=$((RANDOM % 5 + 2))
 echo -e "\e[36m[*] 休眠 ${SLEEP_TIME} 秒模拟阅读...\e[0m"
 sleep $SLEEP_TIME
@@ -940,13 +921,13 @@ systemctl daemon-reload
 systemctl enable cf-probe.service
 systemctl restart cf-probe.service
 
-# 5. 配置双路 Cron (凌晨测IP，白天每6小时自动洗白防送中)
+# 5. 配置双路 Cron
 RAND_MIN=$((RANDOM % 60))
 (crontab -l 2>/dev/null | grep -v "cf-ip-check.sh" | grep -v "cf-ip-warm.sh" ; echo "$RAND_MIN 4 * * * /usr/local/bin/cf-ip-check.sh $SERVER_ID $SECRET ${host}/update-ip" ; echo "$RAND_MIN */6 * * * /usr/local/bin/cf-ip-warm.sh > /dev/null 2>&1") | crontab -
 
 nohup /usr/local/bin/cf-ip-check.sh $SERVER_ID $SECRET "${host}/update-ip" > /dev/null 2>&1 &
 
-echo "✅ 探针及增强模块全部安装成功！"
+echo "✅ 探针及增强模块(三网延迟/IP历史)全部安装成功！"
 `;
     res.setHeader('Content-Type', 'text/plain;charset=UTF-8');
     res.send(bashScript);
@@ -969,7 +950,7 @@ app.post('/update', (req, res) => {
               ram_total = ?, net_rx = ?, net_tx = ?, net_in_speed = ?, net_out_speed = ?,
               os = ?, cpu_info = ?, arch = ?, boot_time = ?, ram_used = ?, swap_total = ?, 
               swap_used = ?, disk_total = ?, disk_used = ?, processes = ?, tcp_conn = ?, udp_conn = ?, 
-              country = ?, ip_v4 = ?, ip_v6 = ?
+              country = ?, ip_v4 = ?, ip_v6 = ?, ping_ct = ?, ping_cu = ?, ping_cm = ?, ping_bd = ?
           WHERE id = ?
         `).run(
           metrics.cpu, metrics.ram, metrics.disk, metrics.load, metrics.uptime, Date.now(),
@@ -979,7 +960,8 @@ app.post('/update', (req, res) => {
           metrics.ram_used || '0', metrics.swap_total || '0', metrics.swap_used || '0',
           metrics.disk_total || '0', metrics.disk_used || '0', metrics.processes || '0',
           metrics.tcp_conn || '0', metrics.udp_conn || '0', countryCode, 
-          metrics.ip_v4 || '0', metrics.ip_v6 || '0', id
+          metrics.ip_v4 || '0', metrics.ip_v6 || '0', 
+          metrics.ping_ct || '0', metrics.ping_cu || '0', metrics.ping_cm || '0', metrics.ping_bd || '0', id
         );
 
         checkOfflineNodes().catch(console.error);
@@ -1037,6 +1019,7 @@ app.get('/api/ip-history', requireAuth, (req, res) => {
     res.json(history);
 });
 
+// 前台大盘展示与详情页 (已集成三网延迟模块)
 app.get('/', (req, res) => {
     const sys = getSysSettings();
     if (sys.is_public !== 'true' && !checkAuth(req)) {
@@ -1098,6 +1081,12 @@ app.get('/', (req, res) => {
             <div class="charts-grid">
               <div class="chart-card"><h3>CPU <span class="chart-val" id="text-cpu">0%</span></h3><canvas id="chartCPU"></canvas></div>
               <div class="chart-card"><h3>内存 <span class="chart-val" id="text-ram">0%</span></h3><div style="font-size:12px; color:#6b7280; margin-bottom:5px;" id="text-swap">Swap: 0 / 0</div><canvas id="chartRAM"></canvas></div>
+              
+              <div class="chart-card">
+                <h3>国内延迟 <span class="chart-val" style="font-size:12px; font-weight:normal;">电信 <b id="t-ct">0</b> | 联通 <b id="t-cu">0</b> | 移动 <b id="t-cm">0</b> | 字节 <b id="t-bd">0</b></span></h3>
+                <canvas id="chartPing"></canvas>
+              </div>
+
               <div class="chart-card"><h3>磁盘 <span class="chart-val" id="text-disk">0%</span></h3><div style="width:100%; height:20px; background:#e5e7eb; border-radius:10px; overflow:hidden; margin-top:40px;"><div id="disk-bar" style="height:100%; width:0%; background:#34d399; transition:width 0.5s;"></div></div><p style="text-align:right; font-size:12px; color:#6b7280; margin-top:8px;" id="text-disk-detail">0 / 0</p></div>
               <div class="chart-card"><h3>进程数 <span class="chart-val" id="text-proc">0</span></h3><canvas id="chartProc"></canvas></div>
               <div class="chart-card"><h3>网络速度 <span class="chart-val" style="font-size:14px;"><span style="color:#10b981">↓</span> <span id="text-net-in">0</span> | <span style="color:#3b82f6">↑</span> <span id="text-net-out">0</span></span></h3><canvas id="chartNet"></canvas></div>
@@ -1110,9 +1099,26 @@ app.get('/', (req, res) => {
             const formatBytes = (bytes) => { const b = parseInt(bytes); if (isNaN(b) || b === 0) return '0 B'; const k = 1024; const sizes = ['B', 'KB', 'MB', 'GB', 'TB']; const i = Math.floor(Math.log(b) / Math.log(k)); return parseFloat((b / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]; };
             const commonOptions = { responsive: true, maintainAspectRatio: false, animation: { duration: 0 }, scales: { x: { display: false }, y: { beginAtZero: true, border: { display: false } } }, plugins: { legend: { display: false }, tooltip: { enabled: false } }, elements: { point: { radius: 0 }, line: { tension: 0.4, borderWidth: 2 } } };
             const createChart = (ctxId, color, bgColor) => { const ctx = document.getElementById(ctxId).getContext('2d'); return new Chart(ctx, { type: 'line', data: { labels: Array(30).fill(''), datasets: [{ data: Array(30).fill(0), borderColor: color, backgroundColor: bgColor, fill: true }] }, options: commonOptions }); };
+            
             const charts = { cpu: createChart('chartCPU', '#3b82f6', 'rgba(59, 130, 246, 0.1)'), ram: createChart('chartRAM', '#8b5cf6', 'rgba(139, 92, 246, 0.1)'), proc: createChart('chartProc', '#ec4899', 'rgba(236, 72, 153, 0.1)') };
             const ctxNet = document.getElementById('chartNet').getContext('2d'); charts.net = new Chart(ctxNet, { type: 'line', data: { labels: Array(30).fill(''), datasets: [ { label: 'In', data: Array(30).fill(0), borderColor: '#10b981', borderWidth: 2, tension: 0.4, pointRadius: 0 }, { label: 'Out', data: Array(30).fill(0), borderColor: '#3b82f6', borderWidth: 2, tension: 0.4, pointRadius: 0 } ]}, options: commonOptions });
             const ctxConn = document.getElementById('chartConn').getContext('2d'); charts.conn = new Chart(ctxConn, { type: 'line', data: { labels: Array(30).fill(''), datasets: [ { label: 'TCP', data: Array(30).fill(0), borderColor: '#6366f1', borderWidth: 2, tension: 0.4, pointRadius: 0 }, { label: 'UDP', data: Array(30).fill(0), borderColor: '#d946ef', borderWidth: 2, tension: 0.4, pointRadius: 0 } ]}, options: commonOptions });
+            
+            // 初始化四线延迟图表
+            const ctxPing = document.getElementById('chartPing').getContext('2d');
+            charts.ping = new Chart(ctxPing, {
+                type: 'line',
+                data: {
+                    labels: Array(30).fill(''),
+                    datasets: [
+                        { label: '电信', data: Array(30).fill(0), borderColor: '#10b981', borderWidth: 2, tension: 0.4, pointRadius: 0 },
+                        { label: '联通', data: Array(30).fill(0), borderColor: '#f59e0b', borderWidth: 2, tension: 0.4, pointRadius: 0 },
+                        { label: '移动', data: Array(30).fill(0), borderColor: '#3b82f6', borderWidth: 2, tension: 0.4, pointRadius: 0 },
+                        { label: '字节', data: Array(30).fill(0), borderColor: '#8b5cf6', borderWidth: 2, tension: 0.4, pointRadius: 0 }
+                    ]
+                }, options: commonOptions
+            });
+
             const updateChartData = (chart, newData, datasetIndex = 0) => { const dataArr = chart.data.datasets[datasetIndex].data; dataArr.push(newData); dataArr.shift(); chart.update(); };
 
             async function fetchData() {
@@ -1124,10 +1130,25 @@ app.get('/', (req, res) => {
                 const isOnline = (Date.now() - data.last_updated) < 30000;
                 const badge = document.getElementById('head-status'); badge.innerText = isOnline ? '在线' : '离线'; badge.style.background = isOnline ? '#10b981' : '#ef4444';
                 if(!isOnline) return;
+                
                 document.getElementById('text-cpu').innerText = data.cpu + '%'; document.getElementById('text-ram').innerText = data.ram + '%'; document.getElementById('text-swap').innerText = 'Swap: ' + data.swap_used + ' MiB / ' + data.swap_total + ' MiB'; document.getElementById('text-proc').innerText = data.processes || '0'; document.getElementById('text-net-in').innerText = formatBytes(data.net_in_speed) + '/s'; document.getElementById('text-net-out').innerText = formatBytes(data.net_out_speed) + '/s'; document.getElementById('text-tcp').innerText = data.tcp_conn || '0'; document.getElementById('text-udp').innerText = data.udp_conn || '0';
+                
                 let diskTotal = parseFloat(data.disk_total) || 0; let diskUsed = parseFloat(data.disk_used) || 0; let diskPct = parseInt(data.disk) || 0;
                 document.getElementById('text-disk').innerText = diskPct + '%'; document.getElementById('disk-bar').style.width = diskPct + '%'; document.getElementById('text-disk-detail').innerText = (diskUsed/1024).toFixed(2) + ' GiB / ' + (diskTotal/1024).toFixed(2) + ' GiB';
+                
+                // 动态更新延迟文本和图表
+                document.getElementById('t-ct').innerText = data.ping_ct + 'ms';
+                document.getElementById('t-cu').innerText = data.ping_cu + 'ms';
+                document.getElementById('t-cm').innerText = data.ping_cm + 'ms';
+                document.getElementById('t-bd').innerText = data.ping_bd + 'ms';
+
                 updateChartData(charts.cpu, parseFloat(data.cpu) || 0); updateChartData(charts.ram, parseFloat(data.ram) || 0); updateChartData(charts.proc, parseInt(data.processes) || 0); updateChartData(charts.net, parseFloat(data.net_in_speed) || 0, 0); updateChartData(charts.net, parseFloat(data.net_out_speed) || 0, 1); updateChartData(charts.conn, parseInt(data.tcp_conn) || 0, 0); updateChartData(charts.conn, parseInt(data.udp_conn) || 0, 1);
+                
+                updateChartData(charts.ping, parseInt(data.ping_ct) || 0, 0);
+                updateChartData(charts.ping, parseInt(data.ping_cu) || 0, 1);
+                updateChartData(charts.ping, parseInt(data.ping_cm) || 0, 2);
+                updateChartData(charts.ping, parseInt(data.ping_bd) || 0, 3);
+
               } catch (e) {}
             }
             setInterval(fetchData, 2000); fetchData();
@@ -1163,6 +1184,15 @@ app.get('/', (req, res) => {
             groups[grpName].push(server);
         }
     }
+
+    // 延迟颜色计算逻辑
+    const getColor = (ping) => {
+        const p = parseInt(ping);
+        if (p === 0 || isNaN(p)) return '#9ca3af'; 
+        if (p < 100) return '#10b981'; 
+        if (p < 200) return '#f59e0b'; 
+        return '#ef4444'; 
+    };
 
     let contentHtml = '';
     if (Object.keys(groups).length === 0) {
@@ -1202,6 +1232,16 @@ app.get('/', (req, res) => {
                 if (server.ip_v4 === '1') badgesHtml += `<span class="badge badge-v4">IPv4</span>`;
                 if (server.ip_v6 === '1') badgesHtml += `<span class="badge badge-v6">IPv6</span>`;
 
+                // 注入三网延迟 HTML
+                const pingHtml = `
+                    <div class="ping-box">
+                        <span>电信 <span style="color:${getColor(server.ping_ct)}; font-weight:bold;">${server.ping_ct === '0' ? '超时' : server.ping_ct + 'ms'}</span></span>
+                        <span>联通 <span style="color:${getColor(server.ping_cu)}; font-weight:bold;">${server.ping_cu === '0' ? '超时' : server.ping_cu + 'ms'}</span></span>
+                        <span>移动 <span style="color:${getColor(server.ping_cm)}; font-weight:bold;">${server.ping_cm === '0' ? '超时' : server.ping_cm + 'ms'}</span></span>
+                        <span>字节 <span style="color:${getColor(server.ping_bd)}; font-weight:bold;">${server.ping_bd === '0' ? '超时' : server.ping_bd + 'ms'}</span></span>
+                    </div>
+                `;
+
                 contentHtml += `
                     <a href="/?id=${server.id}" class="vps-card">
                         <div class="card-left">
@@ -1211,6 +1251,7 @@ app.get('/', (req, res) => {
                             </div>
                             ${metaHtml}
                             <div class="card-badges">${badgesHtml}</div>
+                            ${pingHtml}
                         </div>
                         
                         <div class="card-right">
