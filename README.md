@@ -1,4 +1,4 @@
-````markdown
+
 # ⚡ Server Monitor Pro (Node.js 容器版)
 
 [![Build and Push Docker Image](https://github.com/你的用户名/server-monitor/actions/workflows/docker.yml/badge.svg)](https://github.com/你的用户名/server-monitor/actions)
