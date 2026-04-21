@@ -34,6 +34,32 @@ if (!fs.existsSync(dbDir)) {
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 
+// ==========================================
+// 核心安全升级：主控端本地生成专属 SSH 密钥对
+// ==========================================
+const SSH_KEY_DIR = path.join(dbDir, 'ssh_keys');
+const PRIVATE_KEY_PATH = path.join(SSH_KEY_DIR, 'id_rsa');
+const PUBLIC_KEY_PATH = path.join(SSH_KEY_DIR, 'id_rsa.pub');
+
+if (!fs.existsSync(SSH_KEY_DIR)) {
+    fs.mkdirSync(SSH_KEY_DIR, { recursive: true });
+}
+
+if (!fs.existsSync(PRIVATE_KEY_PATH) || !fs.existsSync(PUBLIC_KEY_PATH)) {
+    console.log('正在生成主控端安全 SSH 密钥对...');
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', {
+        modulusLength: 2048,
+        publicKeyEncoding: { type: 'spki', format: 'pem' },
+        privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
+    });
+    const sshRsaPub = "ssh-rsa " + Buffer.from(publicKey.split('\n').filter(l => l && !l.startsWith('---')).join(''), 'base64').toString('base64') + " Server-Monitor-Pro-Master";
+    fs.writeFileSync(PRIVATE_KEY_PATH, privateKey);
+    fs.writeFileSync(PUBLIC_KEY_PATH, sshRsaPub);
+    console.log('✅ 主控端专属 SSH 密钥对已安全生成！');
+}
+const MASTER_PUBLIC_KEY = fs.readFileSync(PUBLIC_KEY_PATH, 'utf-8');
+const MASTER_PRIVATE_KEY = fs.readFileSync(PRIVATE_KEY_PATH, 'utf-8');
+
 // 初始化表结构
 db.exec(`
   CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
@@ -160,7 +186,7 @@ app.get('/logout', (req, res) => {
 });
 
 // ==========================================
-// Web SSH 终端逻辑 (基于数据库保存凭据与CF Zero Trust穿透)
+// Web SSH 终端逻辑 (主控端自动发卡与零信兼容)
 // ==========================================
 app.ws('/ssh', (ws, req) => {
     if (!checkWebAuth(req)) {
@@ -175,25 +201,24 @@ app.ws('/ssh', (ws, req) => {
         try {
             const data = JSON.parse(msg);
             if (data.type === 'connect') {
-                const server = db.prepare('SELECT ssh_host, ssh_port, ssh_user, ssh_pass FROM servers WHERE id = ?').get(data.serverId);
+                const server = db.prepare('SELECT ssh_host, ssh_port, ssh_user FROM servers WHERE id = ?').get(data.serverId);
                 if (!server) return ws.send(JSON.stringify({ type: 'error', msg: '找不到服务器记录！' }));
 
                 const targetHost = data.host || server.ssh_host;
                 const targetPort = parseInt(data.port || server.ssh_port || 22);
                 const authUser = data.username || server.ssh_user || 'root';
-                // 优先使用界面输入的密码，若留空则使用数据库里手动保存的密码
-                const authPass = data.password || server.ssh_pass || '';
 
                 if (!targetHost) {
                     ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 缺少 IP 地址，请等待探针上报或手动编辑填入！\r\n' }));
                     return;
                 }
 
-                const sshConfig = { username: authUser, password: authPass, tryKeyboard: true };
+                // 核心：使用面板自动生成的本地私钥
+                const sshConfig = { username: authUser, privateKey: MASTER_PRIVATE_KEY, tryKeyboard: true };
                 const isIPv6 = targetHost.includes(':');
 
                 conn.on('ready', () => {
-                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n✅ 认证成功，已连接到服务器...\r\n' }));
+                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n✅ 密钥鉴权成功，已连接到服务器...\r\n' }));
                     conn.shell({ term: 'xterm-color' }, (err, stream) => {
                         if (err) return ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ Shell 创建失败: ' + err.message + '\r\n' }));
                         streamObj = stream;
@@ -206,11 +231,13 @@ app.ws('/ssh', (ws, req) => {
                 }).on('error', (err) => {
                     ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 连接失败: ' + err.message + '\r\n' }));
                 }).on('keyboard-interactive', (name, instr, lang, prompts, finish) => {
-                    finish([authPass]);
+                    // 如果私钥失败，尝试回退使用用户在界面的手动输入密码
+                    finish([data.password || '']);
                 });
 
                 if (isIPv6 && !targetHost.startsWith('fd00:')) {
-                    // 公网 IPv6 尝试走 WARP SOCKS 代理穿透
+                    // 只有公网 IPv6 才尝试走 WARP SOCKS 代理 (40000 端口)
+                    // 如果是 fd00 开头，说明是 Zero Trust 内网 IP，主控 OS 已自动路由，走原生直连
                     ws.send(JSON.stringify({ type: 'status', msg: '\r\n🌐 公网 IPv6 目标，尝试本地 SOCKS5 穿透...\r\n' }));
                     SocksClient.createConnection({
                         proxy: { ipaddress: '127.0.0.1', port: 40000, type: 5 },
@@ -220,7 +247,6 @@ app.ws('/ssh', (ws, req) => {
                         conn.connect({ sock: info.socket, ...sshConfig });
                     });
                 } else {
-                    // 内网 fd00:: 或 IPv4 走原生直连
                     conn.connect({ host: targetHost, port: targetPort, ...sshConfig });
                 }
             } else if (data.type === 'data' && streamObj) streamObj.write(data.data);
@@ -330,6 +356,12 @@ app.get('/api/ip-history', requireWebAuth, (req, res) => {
     res.json(db.prepare('SELECT created_at, report_text FROM ip_reports WHERE server_id = ? ORDER BY created_at DESC').all(req.query.id));
 });
 
+// 安全分发主控端公钥接口
+app.get('/update-pubkey', (req, res) => {
+    res.setHeader('Content-Type', 'text/plain;charset=UTF-8');
+    res.send(MASTER_PUBLIC_KEY);
+});
+
 // ==========================================
 // 前后台 UI 渲染
 // ==========================================
@@ -405,7 +437,7 @@ app.post('/admin/api', requireWebAuth, (req, res) => {
             res.json({ success: true });
         } 
         else if (data.action === 'edit') {
-            db.prepare(`UPDATE servers SET server_group = ?, price = ?, expire_date = ?, bandwidth = ?, traffic_limit = ?, ssh_host = ?, ssh_port = ?, ssh_user = ?, ssh_pass = ? WHERE id = ?`).run(data.server_group || '默认分组', data.price || '', data.expire_date || '', data.bandwidth || '', data.traffic_limit || '', data.ssh_host || '', data.ssh_port || '22', data.ssh_user || 'root', data.ssh_pass || '', data.id);
+            db.prepare(`UPDATE servers SET server_group = ?, price = ?, expire_date = ?, bandwidth = ?, traffic_limit = ? WHERE id = ?`).run(data.server_group || '默认分组', data.price || '', data.expire_date || '', data.bandwidth || '', data.traffic_limit || '', data.id);
             res.json({ success: true });
         }
     } catch (e) { res.status(400).json({ error: e.message }); }
@@ -413,7 +445,7 @@ app.post('/admin/api', requireWebAuth, (req, res) => {
 
 app.get('/admin', requireWebAuth, (req, res) => {
     const sys = getSysSettings();
-    const results = db.prepare('SELECT id, name, last_updated, server_group, price, expire_date, bandwidth, traffic_limit, ssh_host, ssh_port, ssh_user, ssh_pass FROM servers').all();
+    const results = db.prepare('SELECT id, name, last_updated, server_group, price, expire_date, bandwidth, traffic_limit, ssh_host, ssh_port, ssh_user FROM servers').all();
     const now = Date.now();
     const host = `${req.protocol}://${req.get('host')}`;
     let trs = '';
@@ -430,7 +462,7 @@ app.get('/admin', requireWebAuth, (req, res) => {
                     <td>
                         <input type="text" readonly value="${cmd}" style="width:280px; padding:6px; margin-right:5px; border:1px solid #ccc; border-radius:4px;" id="cmd-${s.id}">
                         <button onclick="copyCmd('${s.id}')" class="btn btn-gray">复制命令</button>
-                        <button onclick="openEditModal('${s.id}', '${s.server_group||''}', '${s.price||''}', '${s.expire_date||''}', '${s.bandwidth||''}', '${s.traffic_limit||''}', '${s.ssh_host||''}', '${s.ssh_port||'22'}', '${s.ssh_user||'root'}')" class="btn btn-blue">✏️ 编辑</button>
+                        <button onclick="openEditModal('${s.id}', '${s.server_group||''}', '${s.price||''}', '${s.expire_date||''}', '${s.bandwidth||''}', '${s.traffic_limit||''}')" class="btn btn-blue">✏️ 编辑</button>
                         <button onclick="openIpHistoryModal('${s.id}', '${s.name}')" class="btn btn-purple">🌐 IP质量</button>
                         <button onclick="openSshModal('${s.id}', '${s.name}', '${s.ssh_host||''}', '${s.ssh_port||'22'}', '${s.ssh_user||'root'}')" class="btn btn-green">💻 SSH</button>
                         <button onclick="deleteServer('${s.id}')" class="btn btn-red">🗑️ 删除</button>
@@ -541,18 +573,6 @@ app.get('/admin', requireWebAuth, (req, res) => {
             <div style="flex:1"><label>带宽</label> <input type="text" id="editBandwidth" placeholder="如：1Gbps"></div>
             <div style="flex:1"><label>流量总量</label> <input type="text" id="editTraffic" placeholder="如：1TB/月"></div>
           </div>
-          
-          <hr style="margin: 15px 0; border: none; border-top: 1px dashed #ccc;">
-          <label style="color:#8b5cf6;">💻 SSH 直连配置 (保存后即可免密秒连)</label>
-          <div style="display:flex; gap:10px;">
-            <div style="flex:1"><label>连接 IP</label><input type="text" id="editSshHost" placeholder="探针已自动获取，可手动覆盖"></div>
-            <div style="width:70px"><label>端口</label><input type="text" id="editSshPort" placeholder="22"></div>
-          </div>
-          <div style="display:flex; gap:10px;">
-            <div style="flex:1"><label>用户名</label><input type="text" id="editSshUser" placeholder="root"></div>
-            <div style="flex:1"><label>密码</label><input type="password" id="editSshPass" placeholder="首次请填入密码保存"></div>
-          </div>
-
           <div style="text-align: right; margin-top: 10px;">
             <button onclick="closeModal('editModal')" style="padding: 8px 15px; border: 1px solid #ccc; background: white; margin-right: 5px; cursor:pointer;">取消</button>
             <button onclick="saveEdit()" class="btn btn-blue" style="padding: 8px 15px;">保存更改</button>
@@ -611,7 +631,7 @@ app.get('/admin', requireWebAuth, (req, res) => {
             <div style="flex:1;"><label>目标IP/域名</label><input type="text" id="sshHost" placeholder="探针已自动获取，可手动覆盖"></div>
             <div style="width:80px;"><label>端口</label><input type="text" id="sshPort" placeholder="22"></div>
             <div style="width:120px;"><label>用户名</label><input type="text" id="sshUser" placeholder="root"></div>
-            <div style="flex:1;"><label>密码</label><input type="password" id="sshPass" placeholder="留空使用后台保存的密码"></div>
+            <div style="flex:1;"><label>密码(可留空走私钥)</label><input type="password" id="sshPass" placeholder="🔑 已全自动发卡免密"></div>
             <button onclick="connectSsh()" class="btn btn-green" style="padding: 10px 20px; margin-bottom:12px;">⚡ 连接</button>
           </div>
           <div class="preset-btns">
@@ -669,18 +689,13 @@ app.get('/admin', requireWebAuth, (req, res) => {
           alert('✅ 一键安装命令已复制！');
         }
 
-        function openEditModal(id, group, price, expire, bw, traffic, shost, sport, suser) {
+        function openEditModal(id, group, price, expire, bw, traffic) {
           document.getElementById('editId').value = id;
           document.getElementById('editGroup').value = group || '默认分组';
           document.getElementById('editPrice').value = price || '免费';
           document.getElementById('editExpire').value = expire || '';
           document.getElementById('editBandwidth').value = bw || '';
           document.getElementById('editTraffic').value = traffic || '';
-          document.getElementById('editSshHost').value = shost || '';
-          document.getElementById('editSshPort').value = sport || '22';
-          document.getElementById('editSshUser').value = suser || 'root';
-          // 不在此处显示密码，防止被围观
-          document.getElementById('editSshPass').value = '';
           document.getElementById('editModal').style.display = 'block';
         }
 
@@ -691,11 +706,7 @@ app.get('/admin', requireWebAuth, (req, res) => {
             action: 'edit', id: document.getElementById('editId').value,
             server_group: document.getElementById('editGroup').value, price: document.getElementById('editPrice').value,
             expire_date: document.getElementById('editExpire').value, bandwidth: document.getElementById('editBandwidth').value,
-            traffic_limit: document.getElementById('editTraffic').value,
-            ssh_host: document.getElementById('editSshHost').value,
-            ssh_port: document.getElementById('editSshPort').value,
-            ssh_user: document.getElementById('editSshUser').value,
-            ssh_pass: document.getElementById('editSshPass').value
+            traffic_limit: document.getElementById('editTraffic').value
           };
           const res = await fetch('/admin/api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
           if (res.ok) location.reload(); else alert('保存失败');
@@ -778,7 +789,7 @@ app.get('/admin', requireWebAuth, (req, res) => {
             term.writeln('Welcome to Web SSH Terminal.');
             
             if(host) {
-                term.writeln('\\x1b[36m✨ 探针已上报通信IP，正在尝试全自动直连...\\x1b[0m');
+                term.writeln('\\x1b[36m✨ 探针已上报通信IP，正在使用主控端发卡凭据全自动直连...\\x1b[0m');
                 setTimeout(connectSsh, 500);
             }
         }
@@ -1065,8 +1076,14 @@ app.get('/', (req, res) => {
     </html>`);
 });
 
+// 安全分发主控端公钥接口
+app.get('/update-pubkey', (req, res) => {
+    res.setHeader('Content-Type', 'text/plain;charset=UTF-8');
+    res.send(MASTER_PUBLIC_KEY);
+});
+
 // ==========================================
-// 终极点火脚本：集成 Zero Trust 自动组网
+// 终极点火脚本：集成 Zero Trust 自动组网与公钥拉取
 // ==========================================
 app.get('/install.sh', (req, res) => {
     const host = `${req.protocol}://${req.get('host')}`;
@@ -1088,12 +1105,27 @@ echo "=================================================="
 systemctl stop cf-probe.service 2>/dev/null
 pkill -f cf-probe.sh 2>/dev/null
 
+# ==========================================
+# 阶段 1: 从主控面板安全拉取公钥并注入，开启无密秒连
+# ==========================================
+echo "正在拉取并注入面板控制公钥..."
+MASTER_PUB_KEY=\$(curl -sL "${host}/update-pubkey")
+if [ -n "\$MASTER_PUB_KEY" ]; then
+    mkdir -p ~/.ssh
+    chmod 700 ~/.ssh
+    if ! grep -q "\$MASTER_PUB_KEY" ~/.ssh/authorized_keys 2>/dev/null; then
+        echo "\$MASTER_PUB_KEY" >> ~/.ssh/authorized_keys
+        chmod 600 ~/.ssh/authorized_keys
+        echo "✅ 安全公钥注入成功！"
+    fi
+fi
+
 # 抓取真实 SSH 端口
 SSH_PORT=\$(sshd -T 2>/dev/null | awk '/^port /{print \$2}' | head -n1)
 SSH_PORT=\${SSH_PORT:-22}
 
 # ==========================================
-# 阶段 1: 注入 Cloudflare Zero Trust 自动化组件
+# 阶段 2: 注入 Cloudflare Zero Trust 自动化组件
 # ==========================================
 ZT_IP=""
 if [ -n "${teamName}" ] && [ -n "${clientId}" ]; then
@@ -1129,7 +1161,7 @@ EOFMDM
 fi
 
 # ==========================================
-# 阶段 2: 写入主探针脚本
+# 阶段 3: 写入主探针脚本
 # ==========================================
 cat << 'EOF' > /usr/local/bin/cf-probe.sh
 #!/bin/bash
@@ -1298,7 +1330,7 @@ RAND_MIN=\$((RANDOM % 60))
 
 nohup /usr/local/bin/cf-ip-check.sh $SERVER_ID $SECRET "${host}/update-ip" > /dev/null 2>&1 &
 
-echo "✅ 探针及 CF Zero Trust 网络组件安装成功！"
+echo "✅ 探针及军工级增强模块安装成功！打开面板即可零配置秒连！"
 `;
     res.setHeader('Content-Type', 'text/plain;charset=UTF-8');
     res.send(bashScript);
