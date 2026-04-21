@@ -235,8 +235,6 @@ app.ws('/ssh', (ws, req) => {
                     finish([data.password || '']);
                 });
 
-                // IPv6 分流逻辑：若是 fd00 (Zero Trust IP)，因系统可能自动路由，可尝试直连；
-                // 否则触发 WARP SOCKS5 (40000端口) 隧道穿透。
                 if (isIPv6 && !targetHost.startsWith('fd00:')) {
                     ws.send(JSON.stringify({ type: 'status', msg: '\r\n🌐 探测到公网 IPv6 目标，启动 WARP SOCKS5 隧道穿透...\r\n' }));
                     SocksClient.createConnection({
@@ -348,7 +346,6 @@ app.get('/api/server', (req, res) => {
     if (!id) return res.status(400).send('Miss ID');
     const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
     if (!server) return res.status(404).send('Not Found');
-    // 安全起见，无论如何都不返还密码给前端
     if (!checkWebAuth(req)) { delete server.ssh_pass; delete server.ssh_user; delete server.ssh_host; }
     res.json(server);
 });
