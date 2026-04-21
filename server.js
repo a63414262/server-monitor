@@ -1,6 +1,7 @@
 import express from 'express';
 import expressWs from 'express-ws';
 import { Client } from 'ssh2';
+import { SocksClient } from 'socks'; 
 import Database from 'better-sqlite3';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -22,9 +23,7 @@ const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || '';
 const GITHUB_ALLOWED_USERS = (process.env.GITHUB_ALLOWED_USERS || '').split(',').map(u => u.trim().toLowerCase()).filter(Boolean);
 
 const dbDir = path.dirname(DB_PATH);
-if (!fs.existsSync(dbDir)) {
-    fs.mkdirSync(dbDir, { recursive: true });
-}
+if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
 
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
@@ -36,12 +35,10 @@ const SSH_KEY_DIR = path.join(dbDir, 'ssh_keys');
 const PRIVATE_KEY_PATH = path.join(SSH_KEY_DIR, 'id_rsa');
 const PUBLIC_KEY_PATH = path.join(SSH_KEY_DIR, 'id_rsa.pub');
 
-if (!fs.existsSync(SSH_KEY_DIR)) {
-    fs.mkdirSync(SSH_KEY_DIR, { recursive: true });
-}
+if (!fs.existsSync(SSH_KEY_DIR)) fs.mkdirSync(SSH_KEY_DIR, { recursive: true });
 
 if (!fs.existsSync(PRIVATE_KEY_PATH) || !fs.existsSync(PUBLIC_KEY_PATH)) {
-    console.log('正在生成主控端安全 SSH 密钥对...');
+    console.log('🔑 正在生成主控端安全 SSH 密钥对...');
     const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', {
         modulusLength: 2048,
         publicKeyEncoding: { type: 'spki', format: 'pem' },
@@ -74,7 +71,7 @@ db.exec(`
   );
 `);
 
-// 逐个列独立校验升级，防止报错中断
+// 数据库平滑升级
 const addColumn = (table, column, def) => {
     try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT DEFAULT '${def}'`); } catch (e) {}
 };
@@ -110,64 +107,6 @@ const getSysSettings = () => {
     } catch (e) {}
     return sys;
 };
-
-// ==========================================
-// UI 主题与常量定义
-// ==========================================
-const getThemeStyles = (sys) => `
-    body.theme2 { background-color: #0d1117; color: #c9d1d9; }
-    .theme2 .vps-card, .theme2 .global-stats, .theme2 .header-card, .theme2 .chart-card { background: #161b22; color: #c9d1d9; box-shadow: 0 4px 6px rgba(0,0,0,0.4); border: 1px solid #30363d; }
-    .theme2 .vps-card:hover { border-color: #8b949e; }
-    .theme2 .group-header { color: #58a6ff; border-left-color: #58a6ff; }
-    .theme2 .stat-val, .theme2 .g-val { color: #fff; }
-    .theme2 .stat-label, .theme2 .g-label, .theme2 .g-sub, .theme2 .card-meta { color: #8b949e; }
-    .theme2 .stat-bar { background: #21262d; }
-    .theme2 .divider { background: #30363d; }
-    .theme2 .card-title { color: #fff; }
-
-    body.theme3 { background-color: #fef08a; color: #000; font-weight: 500; }
-    .theme3 .vps-card, .global-stats, .header-card, .chart-card { background: #fff; border: 3px solid #000; border-radius: 0; box-shadow: 6px 6px 0px #000; transition: transform 0.1s, box-shadow 0.1s; }
-    .theme3 .vps-card:hover { transform: translate(2px, 2px); box-shadow: 4px 4px 0px #000; border-color: #000; }
-    .theme3 .group-header { color: #000; border-left: none; border-bottom: 4px solid #000; padding-left: 0; display: inline-block; font-size: 22px; font-weight: 900; text-transform: uppercase; }
-    .theme3 .stat-bar { background: #e5e5e5; border: 1px solid #000; }
-    .theme3 .stat-bar > div { border-right: 1px solid #000; }
-    .theme3 .badge { border: 1px solid #000; border-radius: 0; }
-    .theme3 .stat-val, .theme3 .g-val, .theme3 .card-title { font-weight: 900; color: #000; }
-
-    body.theme4 { background: linear-gradient(45deg, #4facfe 0%, #00f2fe 100%); background-attachment: fixed; color: #fff; }
-    .theme4 .vps-card, .theme4 .global-stats, .theme4 .header-card, .theme4 .chart-card { background: rgba(255, 255, 255, 0.2); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border: 1px solid rgba(255, 255, 255, 0.4); box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.1); color: #fff; }
-    .theme4 .vps-card:hover { background: rgba(255, 255, 255, 0.3); border-color: rgba(255, 255, 255, 0.8); }
-    .theme4 .group-header { color: #fff; border-left-color: #fff; text-shadow: 0 2px 4px rgba(0,0,0,0.2); }
-    .theme4 .stat-val, .theme4 .g-val, .theme4 .card-title { color: #fff; }
-    .theme4 .stat-label, .theme4 .g-label, .theme4 .g-sub, .theme4 .card-meta { color: rgba(255,255,255,0.8); }
-    .theme4 .stat-bar { background: rgba(0,0,0,0.2); }
-    .theme4 .divider { background: rgba(255,255,255,0.2); }
-
-    body.theme5 { background-color: #050505; color: #0ff; font-family: 'Courier New', Courier, monospace; }
-    .theme5 .vps-card, .theme5 .global-stats, .theme5 .header-card, .theme5 .chart-card { background: #0b0c10; border: 1px solid #f0f; border-radius: 0; box-shadow: 0 0 10px rgba(255, 0, 255, 0.2); color: #fff; }
-    .theme5 .vps-card:hover { box-shadow: 0 0 20px rgba(0, 255, 255, 0.5); border-color: #0ff; }
-    .theme5 .group-header { color: #f0f; border-left: 5px solid #0ff; text-shadow: 0 0 5px #f0f; }
-    .theme5 .stat-val, .theme5 .g-val, .theme5 .card-title { color: #0ff; text-shadow: 0 0 5px #0ff; }
-    .theme5 .stat-label, .theme5 .g-label, .theme5 .g-sub, .theme5 .card-meta { color: #f0f; }
-    .theme5 .stat-bar { background: #222; }
-    .theme5 .stat-bar > div { background: #0ff !important; box-shadow: 0 0 10px #0ff; }
-    .theme5 .divider { background: #333; }
-    .theme5 .badge-bw { background: #f0f; box-shadow: 0 0 5px #f0f; }
-    .theme5 .badge-tf { background: #0ff; color:#000; box-shadow: 0 0 5px #0ff; }
-    .ping-box { font-size:11px; margin-top:10px; display:flex; gap:10px; padding: 6px 8px; border-radius: 4px; flex-wrap:wrap; background: rgba(150,150,150,0.1); border: 1px solid rgba(150,150,150,0.2); }
-
-    ${sys.custom_bg ? `
-      body { background: url('${sys.custom_bg}') no-repeat center center fixed !important; background-size: cover !important; }
-      .vps-card, .global-stats, .header-card, .chart-card { background: rgba(255, 255, 255, 0.4) !important; backdrop-filter: blur(12px) !important; -webkit-backdrop-filter: blur(12px) !important; border: 1px solid rgba(255, 255, 255, 0.6) !important; box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.1) !important; color: #111 !important; }
-      .vps-card:hover { background: rgba(255, 255, 255, 0.6) !important; transform: translateY(-3px); }
-      .group-header { color: #fff !important; text-shadow: 0 2px 5px rgba(0,0,0,0.6) !important; border-left-color: #fff !important; }
-      .stat-val, .g-val, .card-title { color: #000 !important; font-weight: 800 !important; }
-      .stat-label, .g-label, .g-sub, .card-meta { color: #333 !important; font-weight: 600 !important; }
-      .stat-bar { background: rgba(0,0,0,0.1) !important; }
-    ` : ''}
-`;
-
-const footerHtml = `<div style="text-align: center; margin-top: 40px; padding-bottom: 20px; font-size: 13px; color: inherit; opacity: 0.8;">Powered by CF-Server-Monitor-Pro | 原生密钥直连版</div>`;
 
 // ==========================================
 // GitHub OAuth 核心逻辑
@@ -241,13 +180,12 @@ app.get('/logout', (req, res) => {
 });
 
 // ==========================================
-// Web SSH 终端逻辑 (原生公网直连 + 密钥鉴权)
+// Web SSH 终端逻辑 (智能分流：V4直连，V6走本地代理)
 // ==========================================
 app.ws('/ssh', (ws, req) => {
     if (!checkWebAuth(req)) {
         ws.send(JSON.stringify({ type: 'error', msg: '会话已过期，请重新登录！' }));
-        ws.close();
-        return;
+        ws.close(); return;
     }
     const conn = new Client();
     let streamObj = null;
@@ -265,40 +203,40 @@ app.ws('/ssh', (ws, req) => {
                 const authPass = data.password || server.ssh_pass || '';
 
                 if (!targetHost) {
-                    ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 缺少 IP 地址，请等待探针上报！\r\n' }));
-                    return;
+                    ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 缺少 IP 地址！\r\n' })); return;
                 }
 
-                // 完全抛弃代理隧道，只用原生连接，并强制注入本机的私钥
-                const sshConfig = { 
-                    host: targetHost, 
-                    port: targetPort, 
-                    username: authUser, 
-                    privateKey: MASTER_PRIVATE_KEY, 
-                    tryKeyboard: true 
-                };
+                const sshConfig = { username: authUser, privateKey: MASTER_PRIVATE_KEY, tryKeyboard: true };
+                const isIPv6 = targetHost.includes(':');
 
                 conn.on('ready', () => {
-                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n✅ 密钥鉴权成功，原生直连已建立...\r\n' }));
+                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n✅ 鉴权成功，已连接到服务器...\r\n' }));
                     conn.shell({ term: 'xterm-color' }, (err, stream) => {
                         if (err) return ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ Shell 创建失败: ' + err.message + '\r\n' }));
                         streamObj = stream;
                         stream.on('data', (d) => ws.send(JSON.stringify({ type: 'data', data: d.toString('utf-8') })));
-                        stream.on('close', () => {
-                            ws.send(JSON.stringify({ type: 'status', msg: '\r\n🔌 连接已断开。\r\n' }));
-                            conn.end(); ws.close();
-                        });
+                        stream.on('close', () => { ws.send(JSON.stringify({ type: 'status', msg: '\r\n🔌 连接已断开。\r\n' })); conn.end(); ws.close(); });
                     });
                 }).on('error', (err) => {
                     ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 连接失败: ' + err.message + '\r\n' }));
                 }).on('keyboard-interactive', (name, instr, lang, prompts, finish) => {
-                    // 如果私钥验证因为任何原因失败，自动回退尝试密码登录
                     finish([authPass]);
                 });
 
-                // 启动直连
-                conn.connect(sshConfig);
-
+                // 【核心突破】：如果目标是 IPv6，使用容器内跑在 40000 端口的 WARP 代理进行穿透！
+                if (isIPv6) {
+                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n🌐 探测到 IPv6 目标，通过本机 WARP 代理穿透...\r\n' }));
+                    SocksClient.createConnection({
+                        proxy: { ipaddress: '127.0.0.1', port: 40000, type: 5 },
+                        command: 'connect', destination: { host: targetHost, port: targetPort }
+                    }, (err, info) => {
+                        if (err) return ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ WARP IPv6 代理失败: ' + err.message + '\r\n' }));
+                        conn.connect({ sock: info.socket, ...sshConfig });
+                    });
+                } else {
+                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n🌐 探测到 IPv4 目标，发起直连...\r\n' }));
+                    conn.connect({ host: targetHost, port: targetPort, ...sshConfig });
+                }
             } else if (data.type === 'data' && streamObj) streamObj.write(data.data);
             else if (data.type === 'resize' && streamObj) streamObj.setWindow(data.rows, data.cols, 800, 600);
         } catch (e) {}
@@ -367,6 +305,80 @@ app.post('/admin/api', requireWebAuth, (req, res) => {
         }
     } catch (e) { res.status(400).json({ error: e.message }); }
 });
+
+app.get('/api/server', (req, res) => {
+    const sys = getSysSettings();
+    if (sys.is_public !== 'true' && !checkWebAuth(req)) return res.status(401).send('Unauthorized');
+    const id = req.query.id;
+    if (!id) return res.status(400).send('Miss ID');
+    const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
+    if (!server) return res.status(404).send('Not Found');
+    if (!checkWebAuth(req)) { delete server.ssh_pass; delete server.ssh_user; delete server.ssh_host; }
+    res.json(server);
+});
+
+app.get('/api/ip-history', requireWebAuth, (req, res) => {
+    res.json(db.prepare('SELECT created_at, report_text FROM ip_reports WHERE server_id = ? ORDER BY created_at DESC').all(req.query.id));
+});
+
+app.get('/update-pubkey', (req, res) => {
+    res.setHeader('Content-Type', 'text/plain;charset=UTF-8');
+    res.send(MASTER_PUBLIC_KEY);
+});
+
+// ==========================================
+// 前后台 UI 渲染
+// ==========================================
+const getThemeStyles = (sys) => `
+    body.theme2 { background-color: #0d1117; color: #c9d1d9; }
+    .theme2 .vps-card, .theme2 .global-stats, .theme2 .header-card, .theme2 .chart-card { background: #161b22; color: #c9d1d9; box-shadow: 0 4px 6px rgba(0,0,0,0.4); border: 1px solid #30363d; }
+    .theme2 .vps-card:hover { border-color: #8b949e; }
+    .theme2 .group-header { color: #58a6ff; border-left-color: #58a6ff; }
+    .theme2 .stat-val, .theme2 .g-val { color: #fff; }
+    .theme2 .stat-label, .theme2 .g-label, .theme2 .g-sub, .theme2 .card-meta { color: #8b949e; }
+    .theme2 .stat-bar { background: #21262d; }
+    .theme2 .divider { background: #30363d; }
+    .theme2 .card-title { color: #fff; }
+    body.theme3 { background-color: #fef08a; color: #000; font-weight: 500; }
+    .theme3 .vps-card, .global-stats, .header-card, .chart-card { background: #fff; border: 3px solid #000; border-radius: 0; box-shadow: 6px 6px 0px #000; transition: transform 0.1s, box-shadow 0.1s; }
+    .theme3 .vps-card:hover { transform: translate(2px, 2px); box-shadow: 4px 4px 0px #000; border-color: #000; }
+    .theme3 .group-header { color: #000; border-left: none; border-bottom: 4px solid #000; padding-left: 0; display: inline-block; font-size: 22px; font-weight: 900; text-transform: uppercase; }
+    .theme3 .stat-bar { background: #e5e5e5; border: 1px solid #000; }
+    .theme3 .stat-bar > div { border-right: 1px solid #000; }
+    .theme3 .badge { border: 1px solid #000; border-radius: 0; }
+    .theme3 .stat-val, .theme3 .g-val, .theme3 .card-title { font-weight: 900; color: #000; }
+    body.theme4 { background: linear-gradient(45deg, #4facfe 0%, #00f2fe 100%); background-attachment: fixed; color: #fff; }
+    .theme4 .vps-card, .theme4 .global-stats, .theme4 .header-card, .theme4 .chart-card { background: rgba(255, 255, 255, 0.2); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border: 1px solid rgba(255, 255, 255, 0.4); box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.1); color: #fff; }
+    .theme4 .vps-card:hover { background: rgba(255, 255, 255, 0.3); border-color: rgba(255, 255, 255, 0.8); }
+    .theme4 .group-header { color: #fff; border-left-color: #fff; text-shadow: 0 2px 4px rgba(0,0,0,0.2); }
+    .theme4 .stat-val, .theme4 .g-val, .theme4 .card-title { color: #fff; }
+    .theme4 .stat-label, .theme4 .g-label, .theme4 .g-sub, .theme4 .card-meta { color: rgba(255,255,255,0.8); }
+    .theme4 .stat-bar { background: rgba(0,0,0,0.2); }
+    .theme4 .divider { background: rgba(255,255,255,0.2); }
+    body.theme5 { background-color: #050505; color: #0ff; font-family: 'Courier New', Courier, monospace; }
+    .theme5 .vps-card, .theme5 .global-stats, .theme5 .header-card, .theme5 .chart-card { background: #0b0c10; border: 1px solid #f0f; border-radius: 0; box-shadow: 0 0 10px rgba(255, 0, 255, 0.2); color: #fff; }
+    .theme5 .vps-card:hover { box-shadow: 0 0 20px rgba(0, 255, 255, 0.5); border-color: #0ff; }
+    .theme5 .group-header { color: #f0f; border-left: 5px solid #0ff; text-shadow: 0 0 5px #f0f; }
+    .theme5 .stat-val, .theme5 .g-val, .theme5 .card-title { color: #0ff; text-shadow: 0 0 5px #0ff; }
+    .theme5 .stat-label, .theme5 .g-label, .theme5 .g-sub, .theme5 .card-meta { color: #f0f; }
+    .theme5 .stat-bar { background: #222; }
+    .theme5 .stat-bar > div { background: #0ff !important; box-shadow: 0 0 10px #0ff; }
+    .theme5 .divider { background: #333; }
+    .theme5 .badge-bw { background: #f0f; box-shadow: 0 0 5px #f0f; }
+    .theme5 .badge-tf { background: #0ff; color:#000; box-shadow: 0 0 5px #0ff; }
+    .ping-box { font-size:11px; margin-top:10px; display:flex; gap:10px; padding: 6px 8px; border-radius: 4px; flex-wrap:wrap; background: rgba(150,150,150,0.1); border: 1px solid rgba(150,150,150,0.2); }
+    ${sys.custom_bg ? `
+      body { background: url('${sys.custom_bg}') no-repeat center center fixed !important; background-size: cover !important; }
+      .vps-card, .global-stats, .header-card, .chart-card { background: rgba(255, 255, 255, 0.4) !important; backdrop-filter: blur(12px) !important; -webkit-backdrop-filter: blur(12px) !important; border: 1px solid rgba(255, 255, 255, 0.6) !important; box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.1) !important; color: #111 !important; }
+      .vps-card:hover { background: rgba(255, 255, 255, 0.6) !important; transform: translateY(-3px); }
+      .group-header { color: #fff !important; text-shadow: 0 2px 5px rgba(0,0,0,0.6) !important; border-left-color: #fff !important; }
+      .stat-val, .g-val, .card-title { color: #000 !important; font-weight: 800 !important; }
+      .stat-label, .g-label, .g-sub, .card-meta { color: #333 !important; font-weight: 600 !important; }
+      .stat-bar { background: rgba(0,0,0,0.1) !important; }
+    ` : ''}
+`;
+
+const footerHtml = `<div style="text-align: center; margin-top: 40px; padding-bottom: 20px; font-size: 13px; color: inherit; opacity: 0.8;">Powered by CF-Server-Monitor-Pro | V4 to V6 Proxy Bridge Edition</div>`;
 
 app.get('/admin', requireWebAuth, (req, res) => {
     const sys = getSysSettings();
@@ -737,10 +749,10 @@ app.get('/admin', requireWebAuth, (req, res) => {
             }
             setTimeout(() => fitAddon.fit(), 100);
             term.reset();
-            term.writeln('Welcome to Web SSH Terminal (Pure Direct Mode).');
+            term.writeln('Welcome to Web SSH Terminal.');
             
             if(host) {
-                term.writeln('\\x1b[36m✨ 探针已上报公网IP，正在使用主控端发卡凭据全自动直连...\\x1b[0m');
+                term.writeln('\\x1b[36m✨ 探针已上报IP，正在进行 V4/V6 智能握手免密直连...\\x1b[0m');
                 setTimeout(connectSsh, 500);
             }
         }
@@ -1027,14 +1039,13 @@ app.get('/', (req, res) => {
     </html>`);
 });
 
-// 安全分发主控端公钥接口
 app.get('/update-pubkey', (req, res) => {
     res.setHeader('Content-Type', 'text/plain;charset=UTF-8');
     res.send(MASTER_PUBLIC_KEY);
 });
 
 // ==========================================
-// 纯净点火脚本：原生探针安装 + 自动注入公钥
+// 极简探针安装脚本：无 WARP 污染，只注入公钥
 // ==========================================
 app.get('/install.sh', (req, res) => {
     const host = `${req.protocol}://${req.get('host')}`;
@@ -1047,7 +1058,7 @@ WORKER_URL="${host}/update"
 if [ -z "\$SERVER_ID" ] || [ -z "\$SECRET" ]; then echo "错误: 缺少参数。"; exit 1; fi
 
 echo "=================================================="
-echo "🚀 开始安装探针 Agent 及 注入直连公钥"
+echo "🚀 开始安装探针 Agent 及 注入公网免密公钥"
 echo "=================================================="
 
 systemctl stop cf-probe.service 2>/dev/null
@@ -1058,22 +1069,21 @@ SSH_PORT=\$(sshd -T 2>/dev/null | awk '/^port /{print \$2}' | head -n1)
 SSH_PORT=\${SSH_PORT:-22}
 
 # ==========================================
-# 阶段 1: 从主控面板安全拉取公钥并注入，开启无密秒连
+# 阶段 1: 从主控面板安全拉取公钥并注入
 # ==========================================
-echo "正在拉取并注入面板控制公钥..."
+echo "正在拉取面板公钥..."
 MASTER_PUB_KEY=\$(curl -sL "${host}/update-pubkey")
 if [ -n "\$MASTER_PUB_KEY" ]; then
     mkdir -p ~/.ssh
     chmod 700 ~/.ssh
-    # 先清理可能残留的旧公钥
     sed -i '/Server-Monitor-Pro-Master/d' ~/.ssh/authorized_keys 2>/dev/null
     echo "\$MASTER_PUB_KEY" >> ~/.ssh/authorized_keys
     chmod 600 ~/.ssh/authorized_keys
-    echo "✅ 安全公钥注入成功！公网免密 SSH 通道已打通。"
+    echo "✅ 面板公钥注入成功！"
 fi
 
 # ==========================================
-# 阶段 2: 写入主探针脚本 (直接获取公网IP)
+# 阶段 2: 写入主探针脚本
 # ==========================================
 cat << 'EOF' > /usr/local/bin/cf-probe.sh
 #!/bin/bash
@@ -1121,7 +1131,7 @@ while true; do
     PING_CM=\$(get_http_ping "\${CM_NODES[\$RANDOM % \${#CM_NODES[@]}]}")
     PING_BD=\$(get_http_ping "lf3-ips.zstaticcdn.com")
     
-    # 纯净版：直接抓取服务器自己的真实出站公网 IP 上报
+    # 获取最真实的机器公网 IP
     REAL_IPV4=\$(curl -s4 -m 3 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | awk -F= '/ip=/{print \$2}')
     REAL_IPV6=\$(curl -s6 -m 3 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | awk -F= '/ip=/{print \$2}')
     BEST_IP="\${REAL_IPV4:-\$REAL_IPV6}"
@@ -1198,20 +1208,13 @@ EOF
 
 cat << 'EOF' > /usr/local/bin/cf-ip-warm.sh
 #!/bin/bash
-echo -e "\\e[33m[IP 养护] 正在初始化原生防送中探测序列...\\e[0m"
+echo -e "\\e[33m[IP 养护] 正在探测本地网络信号...\\e[0m"
 UAS=(
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
-  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 )
-KEYWORDS=("weather" "local+news" "amazon" "netflix" "speedtest" "restaurant+near+me" "buy+shoes+online" "maps")
 RAND_UA=\${UAS[\$RANDOM % \${#UAS[@]}]}
-RAND_KW=\${KEYWORDS[\$RANDOM % \${#KEYWORDS[@]}]}
-
-curl -sL -A "\$RAND_UA" -H "Accept-Language: en-US,en;q=0.9" "https://www.google.com/search?q=\$RAND_KW" > /dev/null
-sleep \$((RANDOM % 5 + 2))
-curl -sL -A "\$RAND_UA" "https://www.youtube.com/results?search_query=\$RAND_KW" > /dev/null
-echo -e "\\e[32m[IP 养护] 探测完成，已成功向全球数据库注入活跃本地信号！\\e[0m"
+curl -sL -A "\$RAND_UA" -H "Accept-Language: en-US,en;q=0.9" "https://www.google.com/search?q=weather" > /dev/null
+echo -e "\\e[32m[IP 养护] 探测完成。\\e[0m"
 EOF
 
 chmod +x /usr/local/bin/cf-probe.sh
@@ -1241,7 +1244,7 @@ RAND_MIN=\$((RANDOM % 60))
 
 nohup /usr/local/bin/cf-ip-check.sh $SERVER_ID $SECRET "${host}/update-ip" > /dev/null 2>&1 &
 
-echo "✅ 探针及原生密钥注入安装成功！现在可以在面板直接免密 SSH 登录了！"
+echo "✅ 探针及公网秘钥注入安装成功！"
 `;
     res.setHeader('Content-Type', 'text/plain;charset=UTF-8');
     res.send(bashScript);
@@ -1299,6 +1302,5 @@ app.post('/update-ip', (req, res) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server Monitor Pro (Node Edition) running on port ${PORT}`);
-    console.log(`Database mounted at ${DB_PATH}`);
+    console.log(`Server Monitor Pro running on port ${PORT}`);
 });
