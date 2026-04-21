@@ -1,7 +1,6 @@
 import express from 'express';
 import expressWs from 'express-ws';
 import { Client } from 'ssh2';
-import { SocksClient } from 'socks'; 
 import Database from 'better-sqlite3';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -12,7 +11,7 @@ expressWs(app);
 app.use(express.json({ limit: '10mb' }));
 
 // ==========================================
-// 容器环境变量配置 (含 GitHub OAuth & CF Zero Trust)
+// 容器环境变量配置
 // ==========================================
 const PORT = process.env.PORT || 3000;
 const API_SECRET = process.env.API_SECRET || 'admin123'; 
@@ -21,10 +20,6 @@ const DB_PATH = process.env.DB_PATH || '/app/data/monitor.db';
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || '';
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || '';
 const GITHUB_ALLOWED_USERS = (process.env.GITHUB_ALLOWED_USERS || '').split(',').map(u => u.trim().toLowerCase()).filter(Boolean);
-
-const CF_TEAM_NAME = process.env.CF_TEAM_NAME || '';
-const CF_CLIENT_ID = process.env.CF_CLIENT_ID || '';
-const CF_CLIENT_SECRET = process.env.CF_CLIENT_SECRET || '';
 
 const dbDir = path.dirname(DB_PATH);
 if (!fs.existsSync(dbDir)) {
@@ -35,7 +30,7 @@ const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 
 // ==========================================
-// 核心安全升级：主控端本地生成专属 SSH 密钥对
+// 核心安全：主控端本地生成专属非对称 SSH 密钥对
 // ==========================================
 const SSH_KEY_DIR = path.join(dbDir, 'ssh_keys');
 const PRIVATE_KEY_PATH = path.join(SSH_KEY_DIR, 'id_rsa');
@@ -79,7 +74,7 @@ db.exec(`
   );
 `);
 
-// 【核心修复】：逐个列独立校验升级，防止一个报错导致后续全部中断
+// 逐个列独立校验升级，防止报错中断
 const addColumn = (table, column, def) => {
     try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT DEFAULT '${def}'`); } catch (e) {}
 };
@@ -117,7 +112,7 @@ const getSysSettings = () => {
 };
 
 // ==========================================
-// UI 主题与常量定义 (修复 ReferenceError 的关键)
+// UI 主题与常量定义
 // ==========================================
 const getThemeStyles = (sys) => `
     body.theme2 { background-color: #0d1117; color: #c9d1d9; }
@@ -172,7 +167,7 @@ const getThemeStyles = (sys) => `
     ` : ''}
 `;
 
-const footerHtml = `<div style="text-align: center; margin-top: 40px; padding-bottom: 20px; font-size: 13px; color: inherit; opacity: 0.8;">Powered by CF-Server-Monitor-Pro | Node.js Edition</div>`;
+const footerHtml = `<div style="text-align: center; margin-top: 40px; padding-bottom: 20px; font-size: 13px; color: inherit; opacity: 0.8;">Powered by CF-Server-Monitor-Pro | 原生密钥直连版</div>`;
 
 // ==========================================
 // GitHub OAuth 核心逻辑
@@ -246,7 +241,7 @@ app.get('/logout', (req, res) => {
 });
 
 // ==========================================
-// Web SSH 终端逻辑 (基于 Zero Trust + 自动密钥免密)
+// Web SSH 终端逻辑 (原生公网直连 + 密钥鉴权)
 // ==========================================
 app.ws('/ssh', (ws, req) => {
     if (!checkWebAuth(req)) {
@@ -261,23 +256,30 @@ app.ws('/ssh', (ws, req) => {
         try {
             const data = JSON.parse(msg);
             if (data.type === 'connect') {
-                const server = db.prepare('SELECT ssh_host, ssh_port, ssh_user FROM servers WHERE id = ?').get(data.serverId);
+                const server = db.prepare('SELECT ssh_host, ssh_port, ssh_user, ssh_pass FROM servers WHERE id = ?').get(data.serverId);
                 if (!server) return ws.send(JSON.stringify({ type: 'error', msg: '找不到服务器记录！' }));
 
                 const targetHost = data.host || server.ssh_host;
                 const targetPort = parseInt(data.port || server.ssh_port || 22);
                 const authUser = data.username || server.ssh_user || 'root';
+                const authPass = data.password || server.ssh_pass || '';
 
                 if (!targetHost) {
                     ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 缺少 IP 地址，请等待探针上报！\r\n' }));
                     return;
                 }
 
-                const sshConfig = { username: authUser, privateKey: MASTER_PRIVATE_KEY, tryKeyboard: true };
-                const isIPv6 = targetHost.includes(':');
+                // 完全抛弃代理隧道，只用原生连接，并强制注入本机的私钥
+                const sshConfig = { 
+                    host: targetHost, 
+                    port: targetPort, 
+                    username: authUser, 
+                    privateKey: MASTER_PRIVATE_KEY, 
+                    tryKeyboard: true 
+                };
 
                 conn.on('ready', () => {
-                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n✅ 密钥鉴权成功，已连接到服务器...\r\n' }));
+                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n✅ 密钥鉴权成功，原生直连已建立...\r\n' }));
                     conn.shell({ term: 'xterm-color' }, (err, stream) => {
                         if (err) return ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ Shell 创建失败: ' + err.message + '\r\n' }));
                         streamObj = stream;
@@ -290,21 +292,13 @@ app.ws('/ssh', (ws, req) => {
                 }).on('error', (err) => {
                     ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 连接失败: ' + err.message + '\r\n' }));
                 }).on('keyboard-interactive', (name, instr, lang, prompts, finish) => {
-                    finish([data.password || '']);
+                    // 如果私钥验证因为任何原因失败，自动回退尝试密码登录
+                    finish([authPass]);
                 });
 
-                if (isIPv6 && !targetHost.startsWith('fd00:')) {
-                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n🌐 探测到公网 IPv6 目标，启动 WARP SOCKS5 隧道穿透...\r\n' }));
-                    SocksClient.createConnection({
-                        proxy: { ipaddress: '127.0.0.1', port: 40000, type: 5 },
-                        command: 'connect', destination: { host: targetHost, port: targetPort }
-                    }, (err, info) => {
-                        if (err) return ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ WARP 代理失败: ' + err.message + '\r\n' }));
-                        conn.connect({ sock: info.socket, ...sshConfig });
-                    });
-                } else {
-                    conn.connect({ host: targetHost, port: targetPort, ...sshConfig });
-                }
+                // 启动直连
+                conn.connect(sshConfig);
+
             } else if (data.type === 'data' && streamObj) streamObj.write(data.data);
             else if (data.type === 'resize' && streamObj) streamObj.setWindow(data.rows, data.cols, 800, 600);
         } catch (e) {}
@@ -591,19 +585,13 @@ app.get('/admin', requireWebAuth, (req, res) => {
       </div>
       
       <script>
-        // 【核心修复】：增加 API 统一请求层，如果因为重启导致 Session 失效，会明确提示你刷新页面
         async function apiCall(data) {
             const res = await fetch('/admin/api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
             if (res.status === 401) {
-                alert('⚠️ 会话已过期或主控端刚重启，请点击确定后重新授权登录！');
-                location.reload();
-                return false;
+                alert('⚠️ 会话已过期或主控端刚重启，请重新授权登录！');
+                location.reload(); return false;
             }
-            if (!res.ok) {
-                const err = await res.json();
-                alert('操作失败: ' + (err.error || '未知错误'));
-                return false;
-            }
+            if (!res.ok) { alert('操作失败'); return false; }
             return true;
         }
 
@@ -749,10 +737,10 @@ app.get('/admin', requireWebAuth, (req, res) => {
             }
             setTimeout(() => fitAddon.fit(), 100);
             term.reset();
-            term.writeln('Welcome to Web SSH Terminal.');
+            term.writeln('Welcome to Web SSH Terminal (Pure Direct Mode).');
             
             if(host) {
-                term.writeln('\\x1b[36m✨ 探针已上报通信IP，正在尝试全自动直连...\\x1b[0m');
+                term.writeln('\\x1b[36m✨ 探针已上报公网IP，正在使用主控端发卡凭据全自动直连...\\x1b[0m');
                 setTimeout(connectSsh, 500);
             }
         }
@@ -769,7 +757,7 @@ app.get('/admin', requireWebAuth, (req, res) => {
             
             if (ws) ws.close();
             term.reset();
-            term.writeln('\\x1b[33mConnecting...\\x1b[0m');
+            term.writeln('\\x1b[33mConnecting to ' + host + '...\\x1b[0m');
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
             ws = new WebSocket(protocol + '//' + location.host + '/ssh');
             ws.onopen = () => {
@@ -794,7 +782,7 @@ app.get('/admin', requireWebAuth, (req, res) => {
 });
 
 // ==========================================
-// 前台与探针接口
+// 前台大盘展示与详情页
 // ==========================================
 app.get('/', (req, res) => {
     const sys = getSysSettings();
@@ -1046,13 +1034,10 @@ app.get('/update-pubkey', (req, res) => {
 });
 
 // ==========================================
-// 终极点火脚本：集成 Zero Trust 自动组网与公钥拉取
+// 纯净点火脚本：原生探针安装 + 自动注入公钥
 // ==========================================
 app.get('/install.sh', (req, res) => {
     const host = `${req.protocol}://${req.get('host')}`;
-    const teamName = process.env.CF_TEAM_NAME || '';
-    const clientId = process.env.CF_CLIENT_ID || '';
-    const clientSecret = process.env.CF_CLIENT_SECRET || '';
 
     const bashScript = `#!/bin/bash
 SERVER_ID=\$1
@@ -1062,11 +1047,15 @@ WORKER_URL="${host}/update"
 if [ -z "\$SERVER_ID" ] || [ -z "\$SECRET" ]; then echo "错误: 缺少参数。"; exit 1; fi
 
 echo "=================================================="
-echo "🚀 开始安装探针 Agent 及 Zero Trust 军工级暗网组件"
+echo "🚀 开始安装探针 Agent 及 注入直连公钥"
 echo "=================================================="
 
 systemctl stop cf-probe.service 2>/dev/null
 pkill -f cf-probe.sh 2>/dev/null
+
+# 抓取真实 SSH 端口
+SSH_PORT=\$(sshd -T 2>/dev/null | awk '/^port /{print \$2}' | head -n1)
+SSH_PORT=\${SSH_PORT:-22}
 
 # ==========================================
 # 阶段 1: 从主控面板安全拉取公钥并注入，开启无密秒连
@@ -1076,62 +1065,15 @@ MASTER_PUB_KEY=\$(curl -sL "${host}/update-pubkey")
 if [ -n "\$MASTER_PUB_KEY" ]; then
     mkdir -p ~/.ssh
     chmod 700 ~/.ssh
-    if ! grep -q "\$MASTER_PUB_KEY" ~/.ssh/authorized_keys 2>/dev/null; then
-        echo "\$MASTER_PUB_KEY" >> ~/.ssh/authorized_keys
-        chmod 600 ~/.ssh/authorized_keys
-        echo "✅ 安全公钥注入成功！"
-    fi
-fi
-
-# 抓取真实 SSH 端口
-SSH_PORT=\$(sshd -T 2>/dev/null | awk '/^port /{print \$2}' | head -n1)
-SSH_PORT=\${SSH_PORT:-22}
-
-# ==========================================
-# 阶段 2: 注入 Cloudflare Zero Trust 自动化组件
-# ==========================================
-ZT_IP=""
-if [ -n "${teamName}" ] && [ -n "${clientId}" ]; then
-    if ! command -v warp-cli &> /dev/null; then
-        echo "📦 正在安装 Cloudflare WARP 官方客户端..."
-        curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-        echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ \$(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
-        sudo apt-get update && sudo apt-get install cloudflare-warp -y
-    fi
-
-    echo "🔐 正在注入 Zero Trust MDM 凭据并组网..."
-    mkdir -p /var/lib/cloudflare-warp
-    cat << 'EOFMDM' > /var/lib/cloudflare-warp/mdm.xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>organization</key>
-  <string>${teamName}</string>
-  <key>auth_client_id</key>
-  <string>${clientId}</string>
-  <key>auth_client_secret</key>
-  <string>${clientSecret}</string>
-</dict>
-</plist>
-EOFMDM
-
-    systemctl restart warp-svc
-    sleep 5
-    warp-cli --accept-tos connect
-    sleep 5
-    
-    ZT_IP=\$(ip -6 addr show CloudflareWARP 2>/dev/null | grep inet6 | grep -v fe80 | awk '{print \$2}' | cut -d/ -f1 | head -n1)
-    
-    if [ -z "\$ZT_IP" ]; then
-        echo "⚠️ 警告: 未能获取到 Zero Trust 内网 IP，请检查面板环境变量配置。"
-    else
-        echo "✅ 成功加入私有网络！分配内网 IP: \$ZT_IP"
-    fi
+    # 先清理可能残留的旧公钥
+    sed -i '/Server-Monitor-Pro-Master/d' ~/.ssh/authorized_keys 2>/dev/null
+    echo "\$MASTER_PUB_KEY" >> ~/.ssh/authorized_keys
+    chmod 600 ~/.ssh/authorized_keys
+    echo "✅ 安全公钥注入成功！公网免密 SSH 通道已打通。"
 fi
 
 # ==========================================
-# 阶段 3: 写入主探针脚本
+# 阶段 2: 写入主探针脚本 (直接获取公网IP)
 # ==========================================
 cat << 'EOF' > /usr/local/bin/cf-probe.sh
 #!/bin/bash
@@ -1139,7 +1081,6 @@ SERVER_ID="\$1"
 SECRET="\$2"
 WORKER_URL="\$3"
 SSH_PORT="\$4"
-ZT_IP="\$5"
 
 get_net_bytes() { awk 'NR>2 {rx+=\$2; tx+=\$10} END {printf "%.0f %.0f", rx, tx}' /proc/net/dev; }
 get_cpu_stat() { awk '/^cpu / {print \$2+\$3+\$4+\$5+\$6+\$7+\$8+\$9, \$5+\$6}' /proc/stat; }
@@ -1180,10 +1121,10 @@ while true; do
     PING_CM=\$(get_http_ping "\${CM_NODES[\$RANDOM % \${#CM_NODES[@]}]}")
     PING_BD=\$(get_http_ping "lf3-ips.zstaticcdn.com")
     
-    # IP 选用逻辑：如果有 Zero Trust 内网 IP，最高优先级！其次是真实公网
+    # 纯净版：直接抓取服务器自己的真实出站公网 IP 上报
     REAL_IPV4=\$(curl -s4 -m 3 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | awk -F= '/ip=/{print \$2}')
     REAL_IPV6=\$(curl -s6 -m 3 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | awk -F= '/ip=/{print \$2}')
-    BEST_IP="\${ZT_IP:-\${REAL_IPV4:-\$REAL_IPV6}}"
+    BEST_IP="\${REAL_IPV4:-\$REAL_IPV6}"
   fi
 
   LOOP_COUNT=\$((LOOP_COUNT + 1))
@@ -1283,7 +1224,7 @@ Description=Server Monitor Probe Agent
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/cf-probe.sh $SERVER_ID $SECRET $WORKER_URL \$SSH_PORT \$ZT_IP
+ExecStart=/usr/local/bin/cf-probe.sh $SERVER_ID $SECRET $WORKER_URL \$SSH_PORT
 Restart=always
 User=root
 
@@ -1300,7 +1241,7 @@ RAND_MIN=\$((RANDOM % 60))
 
 nohup /usr/local/bin/cf-ip-check.sh $SERVER_ID $SECRET "${host}/update-ip" > /dev/null 2>&1 &
 
-echo "✅ 探针及军工级增强模块安装成功！打开面板即可零配置秒连！"
+echo "✅ 探针及原生密钥注入安装成功！现在可以在面板直接免密 SSH 登录了！"
 `;
     res.setHeader('Content-Type', 'text/plain;charset=UTF-8');
     res.send(bashScript);
