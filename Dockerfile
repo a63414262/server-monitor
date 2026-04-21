@@ -1,21 +1,18 @@
-# 使用 Alpine Linux 的 Node.js 基础镜像，体积小
-FROM node:18-alpine
+FROM node:18-bullseye-slim
 
-# 安装编译 better-sqlite3 需要的基础依赖
-RUN apk add --no-cache python3 make g++ sqlite
+# 安装依赖及 Cloudflare WARP
+RUN apt-get update && apt-get install -y curl gnupg lsb-release sqlite3 \
+    && curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list \
+    && apt-get update && apt-get install -y cloudflare-warp \
+    && apt-get clean
 
-# 设置工作目录
 WORKDIR /app
-
-# 拷贝 package.json 并安装依赖
 COPY package*.json ./
 RUN npm install --production
-
-# 拷贝核心代码
 COPY server.js ./
+COPY entrypoint.sh ./
+RUN chmod +x entrypoint.sh
 
-# 暴露端口，供 Claw 平台路由
 EXPOSE 3000
-
-# 启动服务
-CMD ["npm", "start"]
+CMD ["./entrypoint.sh"]
