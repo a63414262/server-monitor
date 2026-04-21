@@ -117,6 +117,64 @@ const getSysSettings = () => {
 };
 
 // ==========================================
+// UI 主题与常量定义 (修复 ReferenceError 的关键)
+// ==========================================
+const getThemeStyles = (sys) => `
+    body.theme2 { background-color: #0d1117; color: #c9d1d9; }
+    .theme2 .vps-card, .theme2 .global-stats, .theme2 .header-card, .theme2 .chart-card { background: #161b22; color: #c9d1d9; box-shadow: 0 4px 6px rgba(0,0,0,0.4); border: 1px solid #30363d; }
+    .theme2 .vps-card:hover { border-color: #8b949e; }
+    .theme2 .group-header { color: #58a6ff; border-left-color: #58a6ff; }
+    .theme2 .stat-val, .theme2 .g-val { color: #fff; }
+    .theme2 .stat-label, .theme2 .g-label, .theme2 .g-sub, .theme2 .card-meta { color: #8b949e; }
+    .theme2 .stat-bar { background: #21262d; }
+    .theme2 .divider { background: #30363d; }
+    .theme2 .card-title { color: #fff; }
+
+    body.theme3 { background-color: #fef08a; color: #000; font-weight: 500; }
+    .theme3 .vps-card, .global-stats, .header-card, .chart-card { background: #fff; border: 3px solid #000; border-radius: 0; box-shadow: 6px 6px 0px #000; transition: transform 0.1s, box-shadow 0.1s; }
+    .theme3 .vps-card:hover { transform: translate(2px, 2px); box-shadow: 4px 4px 0px #000; border-color: #000; }
+    .theme3 .group-header { color: #000; border-left: none; border-bottom: 4px solid #000; padding-left: 0; display: inline-block; font-size: 22px; font-weight: 900; text-transform: uppercase; }
+    .theme3 .stat-bar { background: #e5e5e5; border: 1px solid #000; }
+    .theme3 .stat-bar > div { border-right: 1px solid #000; }
+    .theme3 .badge { border: 1px solid #000; border-radius: 0; }
+    .theme3 .stat-val, .theme3 .g-val, .theme3 .card-title { font-weight: 900; color: #000; }
+
+    body.theme4 { background: linear-gradient(45deg, #4facfe 0%, #00f2fe 100%); background-attachment: fixed; color: #fff; }
+    .theme4 .vps-card, .theme4 .global-stats, .theme4 .header-card, .theme4 .chart-card { background: rgba(255, 255, 255, 0.2); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border: 1px solid rgba(255, 255, 255, 0.4); box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.1); color: #fff; }
+    .theme4 .vps-card:hover { background: rgba(255, 255, 255, 0.3); border-color: rgba(255, 255, 255, 0.8); }
+    .theme4 .group-header { color: #fff; border-left-color: #fff; text-shadow: 0 2px 4px rgba(0,0,0,0.2); }
+    .theme4 .stat-val, .theme4 .g-val, .theme4 .card-title { color: #fff; }
+    .theme4 .stat-label, .theme4 .g-label, .theme4 .g-sub, .theme4 .card-meta { color: rgba(255,255,255,0.8); }
+    .theme4 .stat-bar { background: rgba(0,0,0,0.2); }
+    .theme4 .divider { background: rgba(255,255,255,0.2); }
+
+    body.theme5 { background-color: #050505; color: #0ff; font-family: 'Courier New', Courier, monospace; }
+    .theme5 .vps-card, .theme5 .global-stats, .theme5 .header-card, .theme5 .chart-card { background: #0b0c10; border: 1px solid #f0f; border-radius: 0; box-shadow: 0 0 10px rgba(255, 0, 255, 0.2); color: #fff; }
+    .theme5 .vps-card:hover { box-shadow: 0 0 20px rgba(0, 255, 255, 0.5); border-color: #0ff; }
+    .theme5 .group-header { color: #f0f; border-left: 5px solid #0ff; text-shadow: 0 0 5px #f0f; }
+    .theme5 .stat-val, .theme5 .g-val, .theme5 .card-title { color: #0ff; text-shadow: 0 0 5px #0ff; }
+    .theme5 .stat-label, .theme5 .g-label, .theme5 .g-sub, .theme5 .card-meta { color: #f0f; }
+    .theme5 .stat-bar { background: #222; }
+    .theme5 .stat-bar > div { background: #0ff !important; box-shadow: 0 0 10px #0ff; }
+    .theme5 .divider { background: #333; }
+    .theme5 .badge-bw { background: #f0f; box-shadow: 0 0 5px #f0f; }
+    .theme5 .badge-tf { background: #0ff; color:#000; box-shadow: 0 0 5px #0ff; }
+    .ping-box { font-size:11px; margin-top:10px; display:flex; gap:10px; padding: 6px 8px; border-radius: 4px; flex-wrap:wrap; background: rgba(150,150,150,0.1); border: 1px solid rgba(150,150,150,0.2); }
+
+    ${sys.custom_bg ? `
+      body { background: url('${sys.custom_bg}') no-repeat center center fixed !important; background-size: cover !important; }
+      .vps-card, .global-stats, .header-card, .chart-card { background: rgba(255, 255, 255, 0.4) !important; backdrop-filter: blur(12px) !important; -webkit-backdrop-filter: blur(12px) !important; border: 1px solid rgba(255, 255, 255, 0.6) !important; box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.1) !important; color: #111 !important; }
+      .vps-card:hover { background: rgba(255, 255, 255, 0.6) !important; transform: translateY(-3px); }
+      .group-header { color: #fff !important; text-shadow: 0 2px 5px rgba(0,0,0,0.6) !important; border-left-color: #fff !important; }
+      .stat-val, .g-val, .card-title { color: #000 !important; font-weight: 800 !important; }
+      .stat-label, .g-label, .g-sub, .card-meta { color: #333 !important; font-weight: 600 !important; }
+      .stat-bar { background: rgba(0,0,0,0.1) !important; }
+    ` : ''}
+`;
+
+const footerHtml = `<div style="text-align: center; margin-top: 40px; padding-bottom: 20px; font-size: 13px; color: inherit; opacity: 0.8;">Powered by CF-Server-Monitor-Pro | Node.js Edition</div>`;
+
+// ==========================================
 // GitHub OAuth 核心逻辑
 // ==========================================
 const parseCookies = (request) => {
@@ -203,13 +261,12 @@ app.ws('/ssh', (ws, req) => {
         try {
             const data = JSON.parse(msg);
             if (data.type === 'connect') {
-                const server = db.prepare('SELECT ssh_host, ssh_port, ssh_user, ssh_pass FROM servers WHERE id = ?').get(data.serverId);
+                const server = db.prepare('SELECT ssh_host, ssh_port, ssh_user FROM servers WHERE id = ?').get(data.serverId);
                 if (!server) return ws.send(JSON.stringify({ type: 'error', msg: '找不到服务器记录！' }));
 
                 const targetHost = data.host || server.ssh_host;
                 const targetPort = parseInt(data.port || server.ssh_port || 22);
                 const authUser = data.username || server.ssh_user || 'root';
-                const authPass = data.password || server.ssh_pass || '';
 
                 if (!targetHost) {
                     ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 缺少 IP 地址，请等待探针上报！\r\n' }));
@@ -220,7 +277,7 @@ app.ws('/ssh', (ws, req) => {
                 const isIPv6 = targetHost.includes(':');
 
                 conn.on('ready', () => {
-                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n✅ 鉴权成功，已连接到服务器...\r\n' }));
+                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n✅ 密钥鉴权成功，已连接到服务器...\r\n' }));
                     conn.shell({ term: 'xterm-color' }, (err, stream) => {
                         if (err) return ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ Shell 创建失败: ' + err.message + '\r\n' }));
                         streamObj = stream;
@@ -233,7 +290,7 @@ app.ws('/ssh', (ws, req) => {
                 }).on('error', (err) => {
                     ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 连接失败: ' + err.message + '\r\n' }));
                 }).on('keyboard-interactive', (name, instr, lang, prompts, finish) => {
-                    finish([authPass]);
+                    finish([data.password || '']);
                 });
 
                 if (isIPv6 && !targetHost.startsWith('fd00:')) {
