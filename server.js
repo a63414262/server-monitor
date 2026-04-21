@@ -206,7 +206,7 @@ app.ws('/ssh', (ws, req) => {
                     ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 缺少 IP 地址！\r\n' })); return;
                 }
 
-                // 修改点：加入了 password: authPass 进行兜底密码认证
+                // 修复 1：加入了 password: authPass 进行兜底密码认证
                 const sshConfig = { username: authUser, privateKey: MASTER_PRIVATE_KEY, password: authPass, tryKeyboard: true };
                 const isIPv6 = targetHost.includes(':');
 
@@ -419,9 +419,9 @@ app.get('/admin', requireWebAuth, (req, res) => {
     <head>
       <meta charset="UTF-8">
       <title>${sys.admin_title}</title>
-      <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.css" />
-      <script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.js"></script>
-      <script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/addons/fit/fit.min.js"></script>
+      <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" />
+      <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+      <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
       <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 20px; background: #f0f2f5; color: #333;}
         .card { background: white; padding: 25px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); max-width: 1200px; margin: 0 auto 20px auto; position: relative;}
@@ -736,7 +736,8 @@ app.get('/admin', requireWebAuth, (req, res) => {
             ipHistoryTerm.write(currentIpHistory[index].report_text);
         }
 
-        let term, fitAddon, ws;
+        // 修复 3：增加 termListener 变量防止连续连接产生多次事件监听导致数据包重复和内存泄漏
+        let term, fitAddon, ws, termListener;
         function openSshModal(id, name, host, port, user) {
             document.getElementById('sshServerId').value = id;
             document.getElementById('sshTargetName').innerText = name;
@@ -779,13 +780,14 @@ app.get('/admin', requireWebAuth, (req, res) => {
             ws = new WebSocket(protocol + '//' + location.host + '/ssh');
             ws.onopen = () => {
                 ws.send(JSON.stringify({ type: 'connect', serverId, host, port, username, password }));
-                term.onData(data => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'data', data })); });
+                if (termListener) termListener.dispose();
+                termListener = term.onData(data => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'data', data })); });
             };
             ws.onmessage = (event) => {
                 const msg = JSON.parse(event.data);
                 if (msg.type === 'data') term.write(msg.data);
                 else if (msg.type === 'status') term.write(msg.msg);
-                else if (msg.type === 'error') term.write('\\x1b[31m' + msg.msg + '\\x1b[0m');
+                else if (msg.type === 'error') term.write('\\r\\n\\x1b[31m' + msg.msg + '\\x1b[0m');
             };
             ws.onclose = () => { term.writeln('\\r\\n\\x1b[31mConnection closed.\\x1b[0m'); };
         }
@@ -1146,7 +1148,7 @@ while true; do
   CPU_TOTAL=\$(echo \$CPU_STAT | awk '{print \$1}')
   CPU_IDLE=\$(echo \$CPU_STAT | awk '{print \$2}')
   DIFF_TOTAL=\$((CPU_TOTAL - PREV_CPU_TOTAL))
-  DIFF_IDLE=\$((CPU_IDLE - PREV_CPU_IDLE))
+  DIFF_IDLE=\$((CPU_IDLE - CPU_IDLE))
   CPU=\$(awk -v t=\$DIFF_TOTAL -v i=\$DIFF_IDLE 'BEGIN {if (t==0) print 0; else printf "%.2f", (1 - i/t)*100}')
   PREV_CPU_TOTAL=\$CPU_TOTAL; PREV_CPU_IDLE=\$CPU_IDLE
   
