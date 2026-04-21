@@ -1,28 +1,25 @@
 #!/bin/bash
+echo "=========================================="
+echo "🚀 初始化环境：V4 to V6 WARP 代理桥接模式"
+echo "=========================================="
 
-echo "🚀 初始化 Cloudflare Zero Trust 隐形网络..."
-
-# 修复：必须使用标准的 plist XML 格式，否则 warp-svc 无法读取！
+# 初始化 WARP 目录
 mkdir -p /var/lib/cloudflare-warp
-cat << EOF > /var/lib/cloudflare-warp/mdm.xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>organization</key>
-  <string>${CF_TEAM_NAME}</string>
-  <key>auth_client_id</key>
-  <string>${CF_CLIENT_ID}</string>
-  <key>auth_client_secret</key>
-  <string>${CF_CLIENT_SECRET}</string>
-</dict>
-</plist>
-EOF
 
-# 启动 WARP 后台服务并静默注册
+# 后台静默启动 WARP 守护进程
 /usr/bin/warp-svc > /dev/null 2>&1 &
-sleep 5
+echo "⏳ 等待 WARP 服务启动..."
+sleep 3
+
+# 注册并设置为本地 SOCKS5 代理模式 (端口 40000)
+echo "🔐 注册 WARP 终端并开启本地代理..."
+warp-cli --accept-tos registration new
+warp-cli --accept-tos mode proxy
 warp-cli --accept-tos connect
 
-echo "⚡ 正在启动 Server Monitor Pro 核心服务..."
+sleep 3
+# 打印状态确认连接成功
+warp-cli --accept-tos status
+
+echo "⚡ 启动 Server Monitor Pro 主控程序..."
 exec npm start
