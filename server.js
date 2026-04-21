@@ -6,6 +6,7 @@ import Database from 'better-sqlite3';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import { execSync } from 'child_process'; // 新增：用于生成标准 SSH 秘钥
 
 const app = express();
 expressWs(app);
@@ -37,16 +38,21 @@ const PUBLIC_KEY_PATH = path.join(SSH_KEY_DIR, 'id_rsa.pub');
 
 if (!fs.existsSync(SSH_KEY_DIR)) fs.mkdirSync(SSH_KEY_DIR, { recursive: true });
 
+// 修复核心：检查旧格式错乱的秘钥并用 ssh-keygen 强制生成标准 OpenSSH 秘钥
+let needsGen = false;
 if (!fs.existsSync(PRIVATE_KEY_PATH) || !fs.existsSync(PUBLIC_KEY_PATH)) {
-    console.log('🔑 正在生成主控端安全 SSH 密钥对...');
-    const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', {
-        modulusLength: 2048,
-        publicKeyEncoding: { type: 'spki', format: 'pem' },
-        privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
-    });
-    const sshRsaPub = "ssh-rsa " + Buffer.from(publicKey.split('\n').filter(l => l && !l.startsWith('---')).join(''), 'base64').toString('base64') + " Server-Monitor-Pro-Master";
-    fs.writeFileSync(PRIVATE_KEY_PATH, privateKey);
-    fs.writeFileSync(PUBLIC_KEY_PATH, sshRsaPub);
+    needsGen = true;
+} else {
+    const pub = fs.readFileSync(PUBLIC_KEY_PATH, 'utf-8');
+    if (!pub.startsWith('ssh-rsa AAA')) needsGen = true; // 识别并淘汰旧版错误格式的秘钥
+}
+
+if (needsGen) {
+    console.log('🔑 检测到密钥缺失或格式过旧，正在生成标准 OpenSSH 格式密钥对...');
+    if (fs.existsSync(PRIVATE_KEY_PATH)) fs.unlinkSync(PRIVATE_KEY_PATH);
+    if (fs.existsSync(PUBLIC_KEY_PATH)) fs.unlinkSync(PUBLIC_KEY_PATH);
+    // 使用系统的 ssh-keygen 保证 100% 兼容性
+    execSync(`ssh-keygen -t rsa -b 2048 -m PEM -N "" -C "Server-Monitor-Pro-Master" -f "${PRIVATE_KEY_PATH}"`);
     console.log('✅ 主控端专属 SSH 密钥对已安全生成！');
 }
 const MASTER_PUBLIC_KEY = fs.readFileSync(PUBLIC_KEY_PATH, 'utf-8');
@@ -180,7 +186,7 @@ app.get('/logout', (req, res) => {
 });
 
 // ==========================================
-// Web SSH 终端逻辑 (终极鉴权修复版)
+// Web SSH 终端逻辑 (终极带 DEBUG 透传版)
 // ==========================================
 app.ws('/ssh', (ws, req) => {
     if (!checkWebAuth(req)) {
@@ -206,11 +212,17 @@ app.ws('/ssh', (ws, req) => {
                     ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 缺少 IP 地址！\r\n' })); return;
                 }
 
-                // 【修复核心】：智能动态鉴权。有密码绝不用私钥，无密码才用私钥秒连。
+                // 【修复核心】：开启底层 Debug 日志，实时打印连接状态
                 const sshConfig = { 
                     username: authUser, 
                     tryKeyboard: true,
-                    readyTimeout: 20000 
+                    readyTimeout: 15000,
+                    debug: (info) => {
+                        if (ws && ws.readyState === 1) {
+                            // 用灰色字体打印底层日志
+                            ws.send(JSON.stringify({ type: 'data', data: `\x1b[90m[SSH底层日志] ${info}\x1b[0m\r\n` }));
+                        }
+                    }
                 };
                 
                 if (authPass) {
@@ -239,7 +251,6 @@ app.ws('/ssh', (ws, req) => {
                     }
                 });
 
-                // 如果目标是 IPv6，使用容器内的 WARP 代理进行穿透
                 if (isIPv6) {
                     ws.send(JSON.stringify({ type: 'status', msg: '\r\n🌐 探测到 IPv6 目标，尝试通过本机 WARP 代理穿透...\r\n' }));
                     SocksClient.createConnection({
