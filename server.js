@@ -1,7 +1,7 @@
 import express from 'express';
 import expressWs from 'express-ws';
 import { Client } from 'ssh2';
-import { SocksClient } from 'socks'; // 引入 SOCKS5 客户端
+import { SocksClient } from 'socks'; 
 import Database from 'better-sqlite3';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -181,7 +181,7 @@ app.ws('/ssh', (ws, req) => {
             const data = JSON.parse(msg);
             if (data.type === 'connect') {
                 const targetPort = parseInt(data.port) || 22;
-                const isIPv6 = data.host.includes(':'); // 智能判断目标是否为 IPv6 地址
+                const isIPv6 = data.host.includes(':'); 
 
                 conn.on('ready', () => {
                     ws.send(JSON.stringify({ type: 'status', msg: '\r\n✅ SSH 认证成功，终端已连接...\r\n' }));
@@ -204,7 +204,6 @@ app.ws('/ssh', (ws, req) => {
                 });
 
                 if (isIPv6) {
-                    // 若目标为 IPv6，底层自动通过容器内的 WARP SOCKS5 (40000端口) 建立代理连接
                     ws.send(JSON.stringify({ type: 'status', msg: '\r\n🌐 探测到纯 IPv6 目标，正在启动 WARP 隐形隧道穿透...\r\n' }));
                     const proxyOptions = {
                         proxy: { ipaddress: '127.0.0.1', port: 40000, type: 5 },
@@ -225,7 +224,6 @@ app.ws('/ssh', (ws, req) => {
                         });
                     });
                 } else {
-                    // 若目标为 IPv4，走高并发原生直连
                     conn.connect({
                         host: data.host,
                         port: targetPort,
@@ -788,7 +786,7 @@ app.get('/admin', requireWebAuth, (req, res) => {
     res.send(html);
 });
 
-// 一键安装脚本
+// 一键安装脚本 (包含转义修复的 Bash 变量)
 app.get('/install.sh', (req, res) => {
     const host = `${req.protocol}://${req.get('host')}`;
     const bashScript = `#!/bin/bash
@@ -808,8 +806,8 @@ SERVER_ID="$1"
 SECRET="$2"
 WORKER_URL="$3"
 
-get_net_bytes() { awk 'NR>2 {rx+=$2; tx+=$10} END {printf "%.0f %.0f", rx, tx}' /proc/net/dev; }
-get_cpu_stat() { awk '/^cpu / {print $2+$3+$4+$5+$6+$7+$8+$9, $5+$6}' /proc/stat; }
+get_net_bytes() { awk 'NR>2 {rx+=\$2; tx+=\$10} END {printf "%.0f %.0f", rx, tx}' /proc/net/dev; }
+get_cpu_stat() { awk '/^cpu / {print \$2+\$3+\$4+\$5+\$6+\$7+\$8+\$9, \$5+\$6}' /proc/stat; }
 
 CT_NODES=("bj-ct-dualstack.ip.zstaticcdn.com" "sh-ct-dualstack.ip.zstaticcdn.com" "gd-ct-dualstack.ip.zstaticcdn.com")
 CU_NODES=("bj-cu-dualstack.ip.zstaticcdn.com" "sh-cu-dualstack.ip.zstaticcdn.com" "gd-cu-dualstack.ip.zstaticcdn.com")
@@ -820,84 +818,84 @@ get_http_ping() {
   echo "\${rtt:-0}"
 }
 
-NET_STAT=$(get_net_bytes)
-RX_PREV=$(echo $NET_STAT | awk '{print $1}')
-TX_PREV=$(echo $NET_STAT | awk '{print $2}')
-if [ -z "$RX_PREV" ]; then RX_PREV=0; fi
-if [ -z "$TX_PREV" ]; then TX_PREV=0; fi
+NET_STAT=\$(get_net_bytes)
+RX_PREV=\$(echo \$NET_STAT | awk '{print \$1}')
+TX_PREV=\$(echo \$NET_STAT | awk '{print \$2}')
+if [ -z "\$RX_PREV" ]; then RX_PREV=0; fi
+if [ -z "\$TX_PREV" ]; then TX_PREV=0; fi
 
-CPU_STAT=$(get_cpu_stat)
-PREV_CPU_TOTAL=$(echo $CPU_STAT | awk '{print $1}')
-PREV_CPU_IDLE=$(echo $CPU_STAT | awk '{print $2}')
+CPU_STAT=\$(get_cpu_stat)
+PREV_CPU_TOTAL=\$(echo \$CPU_STAT | awk '{print \$1}')
+PREV_CPU_IDLE=\$(echo \$CPU_STAT | awk '{print \$2}')
 
 LOOP_COUNT=0
 IPV4="0"; IPV6="0"
 PING_CT="0"; PING_CU="0"; PING_CM="0"; PING_BD="0"
 
 while true; do
-  if [ $((LOOP_COUNT % 60)) -eq 0 ]; then
+  if [ \$((LOOP_COUNT % 60)) -eq 0 ]; then
     curl -s -4 -m 3 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q "ip=" && IPV4="1" || IPV4="0"
     curl -s -6 -m 3 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q "ip=" && IPV6="1" || IPV6="0"
   fi
   
-  if [ $((LOOP_COUNT % 6)) -eq 0 ]; then
+  if [ \$((LOOP_COUNT % 6)) -eq 0 ]; then
     PING_CT=\$(get_http_ping "\${CT_NODES[\$RANDOM % \${#CT_NODES[@]}]}")
     PING_CU=\$(get_http_ping "\${CU_NODES[\$RANDOM % \${#CU_NODES[@]}]}")
     PING_CM=\$(get_http_ping "\${CM_NODES[\$RANDOM % \${#CM_NODES[@]}]}")
     PING_BD=\$(get_http_ping "lf3-ips.zstaticcdn.com")
   fi
 
-  LOOP_COUNT=$((LOOP_COUNT + 1))
+  LOOP_COUNT=\$((LOOP_COUNT + 1))
 
-  OS=$(awk -F= '/^PRETTY_NAME/{print $2}' /etc/os-release | tr -d '"')
-  if [ -z "$OS" ]; then OS=$(uname -srm); fi
-  ARCH=$(uname -m)
-  BOOT_TIME=$(uptime -s 2>/dev/null || stat -c %y / 2>/dev/null | cut -d'.' -f1 || echo "Unknown")
-  CPU_INFO=$(grep -m 1 'model name' /proc/cpuinfo | awk -F: '{print $2}' | xargs | tr -d '"')
+  OS=\$(awk -F= '/^PRETTY_NAME/{print \$2}' /etc/os-release | tr -d '"')
+  if [ -z "\$OS" ]; then OS=\$(uname -srm); fi
+  ARCH=\$(uname -m)
+  BOOT_TIME=\$(uptime -s 2>/dev/null || stat -c %y / 2>/dev/null | cut -d'.' -f1 || echo "Unknown")
+  CPU_INFO=\$(grep -m 1 'model name' /proc/cpuinfo | awk -F: '{print \$2}' | xargs | tr -d '"')
   
-  CPU_STAT=$(get_cpu_stat)
-  CPU_TOTAL=$(echo $CPU_STAT | awk '{print $1}')
-  CPU_IDLE=$(echo $CPU_STAT | awk '{print $2}')
-  DIFF_TOTAL=$((CPU_TOTAL - PREV_CPU_TOTAL))
-  DIFF_IDLE=$((CPU_IDLE - PREV_CPU_IDLE))
-  CPU=$(awk -v t=$DIFF_TOTAL -v i=$DIFF_IDLE 'BEGIN {if (t==0) print 0; else printf "%.2f", (1 - i/t)*100}')
-  PREV_CPU_TOTAL=$CPU_TOTAL; PREV_CPU_IDLE=$CPU_IDLE
+  CPU_STAT=\$(get_cpu_stat)
+  CPU_TOTAL=\$(echo \$CPU_STAT | awk '{print \$1}')
+  CPU_IDLE=\$(echo \$CPU_STAT | awk '{print \$2}')
+  DIFF_TOTAL=\$((CPU_TOTAL - PREV_CPU_TOTAL))
+  DIFF_IDLE=\$((CPU_IDLE - PREV_CPU_IDLE))
+  CPU=\$(awk -v t=\$DIFF_TOTAL -v i=\$DIFF_IDLE 'BEGIN {if (t==0) print 0; else printf "%.2f", (1 - i/t)*100}')
+  PREV_CPU_TOTAL=\$CPU_TOTAL; PREV_CPU_IDLE=\$CPU_IDLE
   
-  MEM_INFO=$(free -m)
-  RAM_TOTAL=$(echo "$MEM_INFO" | awk '/Mem:/ {print $2}')
-  RAM_USED=$(echo "$MEM_INFO" | awk '/Mem:/ {print $3}')
-  RAM=$(awk "BEGIN {if($RAM_TOTAL>0) printf \\"%.2f\\", $RAM_USED/$RAM_TOTAL * 100.0; else print 0}")
+  MEM_INFO=\$(free -m)
+  RAM_TOTAL=\$(echo "\$MEM_INFO" | awk '/Mem:/ {print \$2}')
+  RAM_USED=\$(echo "\$MEM_INFO" | awk '/Mem:/ {print \$3}')
+  RAM=\$(awk "BEGIN {if(\$RAM_TOTAL>0) printf \\"%.2f\\", \$RAM_USED/\$RAM_TOTAL * 100.0; else print 0}")
   
-  SWAP_TOTAL=$(echo "$MEM_INFO" | awk '/Swap:/ {print $2}')
-  SWAP_USED=$(echo "$MEM_INFO" | awk '/Swap:/ {print $3}')
-  if [ -z "$SWAP_TOTAL" ]; then SWAP_TOTAL=0; fi
-  if [ -z "$SWAP_USED" ]; then SWAP_USED=0; fi
+  SWAP_TOTAL=\$(echo "\$MEM_INFO" | awk '/Swap:/ {print \$2}')
+  SWAP_USED=\$(echo "\$MEM_INFO" | awk '/Swap:/ {print \$3}')
+  if [ -z "\$SWAP_TOTAL" ]; then SWAP_TOTAL=0; fi
+  if [ -z "\$SWAP_USED" ]; then SWAP_USED=0; fi
 
-  DISK_INFO=$(df -hm / | tail -n1 | awk '{print $2, $3, $5}')
-  DISK_TOTAL=$(echo "$DISK_INFO" | awk '{print $1}')
-  DISK_USED=$(echo "$DISK_INFO" | awk '{print $2}')
-  DISK=$(echo "$DISK_INFO" | awk '{print $3}' | tr -d '%')
+  DISK_INFO=\$(df -hm / | tail -n1 | awk '{print \$2, \$3, \$5}')
+  DISK_TOTAL=\$(echo "\$DISK_INFO" | awk '{print \$1}')
+  DISK_USED=\$(echo "\$DISK_INFO" | awk '{print \$2}')
+  DISK=\$(echo "\$DISK_INFO" | awk '{print \$3}' | tr -d '%')
 
-  LOAD=$(cat /proc/loadavg | awk '{print $1, $2, $3}')
-  UPTIME=$(uptime -p | sed 's/up //')
+  LOAD=\$(cat /proc/loadavg | awk '{print \$1, \$2, \$3}')
+  UPTIME=\$(uptime -p | sed 's/up //')
   
-  PROCESSES=$(ps -e | wc -l)
-  TCP_CONN=$(ss -ant 2>/dev/null | grep -v State | wc -l || netstat -ant 2>/dev/null | grep -v Active | wc -l)
-  UDP_CONN=$(ss -anu 2>/dev/null | grep -v State | wc -l || netstat -anu 2>/dev/null | grep -v Active | wc -l)
+  PROCESSES=\$(ps -e | wc -l)
+  TCP_CONN=\$(ss -ant 2>/dev/null | grep -v State | wc -l || netstat -ant 2>/dev/null | grep -v Active | wc -l)
+  UDP_CONN=\$(ss -anu 2>/dev/null | grep -v State | wc -l || netstat -anu 2>/dev/null | grep -v Active | wc -l)
   
-  NET_STAT=$(get_net_bytes)
-  RX_NOW=$(echo $NET_STAT | awk '{print $1}')
-  TX_NOW=$(echo $NET_STAT | awk '{print $2}')
-  if [ -z "$RX_NOW" ]; then RX_NOW=0; fi
-  if [ -z "$TX_NOW" ]; then TX_NOW=0; fi
+  NET_STAT=\$(get_net_bytes)
+  RX_NOW=\$(echo \$NET_STAT | awk '{print \$1}')
+  TX_NOW=\$(echo \$NET_STAT | awk '{print \$2}')
+  if [ -z "\$RX_NOW" ]; then RX_NOW=0; fi
+  if [ -z "\$TX_NOW" ]; then TX_NOW=0; fi
 
-  RX_SPEED=$(((RX_NOW - RX_PREV) / 5))
-  TX_SPEED=$(((TX_NOW - TX_PREV) / 5))
-  RX_PREV=$RX_NOW; TX_PREV=$TX_NOW
+  RX_SPEED=\$(((RX_NOW - RX_PREV) / 5))
+  TX_SPEED=\$(((TX_NOW - TX_PREV) / 5))
+  RX_PREV=\$RX_NOW; TX_PREV=\$TX_NOW
   
-  PAYLOAD="{\\"id\\": \\"$SERVER_ID\\", \\"secret\\": \\"$SECRET\\", \\"metrics\\": { \\"cpu\\": \\"$CPU\\", \\"ram\\": \\"$RAM\\", \\"ram_total\\": \\"$RAM_TOTAL\\", \\"ram_used\\": \\"$RAM_USED\\", \\"swap_total\\": \\"$SWAP_TOTAL\\", \\"swap_used\\": \\"$SWAP_USED\\", \\"disk\\": \\"$DISK\\", \\"disk_total\\": \\"$DISK_TOTAL\\", \\"disk_used\\": \\"$DISK_USED\\", \\"load\\": \\"$LOAD\\", \\"uptime\\": \\"$UPTIME\\", \\"boot_time\\": \\"$BOOT_TIME\\", \\"net_rx\\": \\"$RX_NOW\\", \\"net_tx\\": \\"$TX_NOW\\", \\"net_in_speed\\": \\"$RX_SPEED\\", \\"net_out_speed\\": \\"$TX_SPEED\\", \\"os\\": \\"$OS\\", \\"arch\\": \\"$ARCH\\", \\"cpu_info\\": \\"$CPU_INFO\\", \\"processes\\": \\"$PROCESSES\\", \\"tcp_conn\\": \\"$TCP_CONN\\", \\"udp_conn\\": \\"$UDP_CONN\\", \\"ip_v4\\": \\"$IPV4\\", \\"ip_v6\\": \\"$IPV6\\", \\"ping_ct\\": \\"$PING_CT\\", \\"ping_cu\\": \\"$PING_CU\\", \\"ping_cm\\": \\"$PING_CM\\", \\"ping_bd\\": \\"$PING_BD\\" }}"
+  PAYLOAD="{\\"id\\": \\"$SERVER_ID\\", \\"secret\\": \\"$SECRET\\", \\"metrics\\": { \\"cpu\\": \\"\$CPU\\", \\"ram\\": \\"\$RAM\\", \\"ram_total\\": \\"\$RAM_TOTAL\\", \\"ram_used\\": \\"\$RAM_USED\\", \\"swap_total\\": \\"\$SWAP_TOTAL\\", \\"swap_used\\": \\"\$SWAP_USED\\", \\"disk\\": \\"\$DISK\\", \\"disk_total\\": \\"\$DISK_TOTAL\\", \\"disk_used\\": \\"\$DISK_USED\\", \\"load\\": \\"\$LOAD\\", \\"uptime\\": \\"\$UPTIME\\", \\"boot_time\\": \\"\$BOOT_TIME\\", \\"net_rx\\": \\"\$RX_NOW\\", \\"net_tx\\": \\"\$TX_NOW\\", \\"net_in_speed\\": \\"\$RX_SPEED\\", \\"net_out_speed\\": \\"\$TX_SPEED\\", \\"os\\": \\"\$OS\\", \\"arch\\": \\"\$ARCH\\", \\"cpu_info\\": \\"\$CPU_INFO\\", \\"processes\\": \\"\$PROCESSES\\", \\"tcp_conn\\": \\"\$TCP_CONN\\", \\"udp_conn\\": \\"\$UDP_CONN\\", \\"ip_v4\\": \\"\$IPV4\\", \\"ip_v6\\": \\"\$IPV6\\", \\"ping_ct\\": \\"\$PING_CT\\", \\"ping_cu\\": \\"\$PING_CU\\", \\"ping_cm\\": \\"\$PING_CM\\", \\"ping_bd\\": \\"\$PING_BD\\" }}"
   
-  curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$WORKER_URL" > /dev/null
+  curl -s -X POST -H "Content-Type: application/json" -d "\$PAYLOAD" "$WORKER_URL" > /dev/null
   sleep 5
 done
 EOF
@@ -909,29 +907,29 @@ SECRET="$2"
 WORKER_URL="$3"
 
 if ! command -v curl &> /dev/null; then exit 1; fi
-REPORT=$(curl -sL https://raw.githubusercontent.com/xykt/IPQuality/main/ip.sh | bash)
-REPORT_B64=$(echo "$REPORT" | base64 | tr -d '\n' | tr -d '\r')
+REPORT=\$(curl -sL https://raw.githubusercontent.com/xykt/IPQuality/main/ip.sh | bash)
+REPORT_B64=\$(echo "\$REPORT" | base64 | tr -d '\\n' | tr -d '\\r')
 
-PAYLOAD="{\"id\": \"$SERVER_ID\", \"secret\": \"$SECRET\", \"report_b64\": \"$REPORT_B64\"}"
-curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$WORKER_URL" > /dev/null
+PAYLOAD="{\\"id\\": \\"$SERVER_ID\\", \\"secret\\": \\"$SECRET\\", \\"report_b64\\": \\"\$REPORT_B64\\"}"
+curl -s -X POST -H "Content-Type: application/json" -d "\$PAYLOAD" "$WORKER_URL" > /dev/null
 EOF
 
 cat << 'EOF' > /usr/local/bin/cf-ip-warm.sh
 #!/bin/bash
-echo -e "\e[33m[IP 养护] 正在初始化原生防送中探测序列...\e[0m"
+echo -e "\\e[33m[IP 养护] 正在初始化原生防送中探测序列...\\e[0m"
 UAS=(
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 )
 KEYWORDS=("weather" "local+news" "amazon" "netflix" "speedtest" "restaurant+near+me" "buy+shoes+online" "maps")
-RAND_UA=${UAS[$RANDOM % ${#UAS[@]}]}
-RAND_KW=${KEYWORDS[$RANDOM % ${#KEYWORDS[@]}]}
+RAND_UA=\${UAS[\$RANDOM % \${#UAS[@]}]}
+RAND_KW=\${KEYWORDS[\$RANDOM % \${#KEYWORDS[@]}]}
 
-curl -sL -A "$RAND_UA" -H "Accept-Language: en-US,en;q=0.9" "https://www.google.com/search?q=$RAND_KW" > /dev/null
-sleep $((RANDOM % 5 + 2))
-curl -sL -A "$RAND_UA" "https://www.youtube.com/results?search_query=$RAND_KW" > /dev/null
-echo -e "\e[32m[IP 养护] 探测完成，已成功向全球数据库注入活跃本地信号！\e[0m"
+curl -sL -A "\$RAND_UA" -H "Accept-Language: en-US,en;q=0.9" "https://www.google.com/search?q=\$RAND_KW" > /dev/null
+sleep \$((RANDOM % 5 + 2))
+curl -sL -A "\$RAND_UA" "https://www.youtube.com/results?search_query=\$RAND_KW" > /dev/null
+echo -e "\\e[32m[IP 养护] 探测完成，已成功向全球数据库注入活跃本地信号！\\e[0m"
 EOF
 
 chmod +x /usr/local/bin/cf-probe.sh
@@ -956,8 +954,8 @@ systemctl daemon-reload
 systemctl enable cf-probe.service
 systemctl restart cf-probe.service
 
-RAND_MIN=$((RANDOM % 60))
-(crontab -l 2>/dev/null | grep -v "cf-ip-check.sh" | grep -v "cf-ip-warm.sh" ; echo "$RAND_MIN 4 * * * /usr/local/bin/cf-ip-check.sh $SERVER_ID $SECRET ${host}/update-ip" ; echo "$RAND_MIN */6 * * * /usr/local/bin/cf-ip-warm.sh > /dev/null 2>&1") | crontab -
+RAND_MIN=\$((RANDOM % 60))
+(crontab -l 2>/dev/null | grep -v "cf-ip-check.sh" | grep -v "cf-ip-warm.sh" ; echo "\$RAND_MIN 4 * * * /usr/local/bin/cf-ip-check.sh $SERVER_ID $SECRET ${host}/update-ip" ; echo "\$RAND_MIN */6 * * * /usr/local/bin/cf-ip-warm.sh > /dev/null 2>&1") | crontab -
 
 nohup /usr/local/bin/cf-ip-check.sh $SERVER_ID $SECRET "${host}/update-ip" > /dev/null 2>&1 &
 
@@ -1302,7 +1300,7 @@ app.get('/', (req, res) => {
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <title>${sys.site_title}</title>
       <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #f4f5f7; color: #333; margin: 0; padding: 20px; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f4f5f7; color: #333; margin: 0; padding: 20px; }
         .container { max-width: 1200px; margin: 0 auto; }
         .global-stats { display: flex; flex-wrap: wrap; gap: 20px; justify-content: space-around; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.03); margin-bottom: 30px; text-align: center; }
         .g-item { flex: 1; min-width: 200px; }
