@@ -1,6 +1,7 @@
 import express from 'express';
 import expressWs from 'express-ws';
 import { Client } from 'ssh2';
+import { SocksClient } from 'socks'; // 引入 SOCKS5 客户端
 import Database from 'better-sqlite3';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -11,15 +12,14 @@ expressWs(app);
 app.use(express.json({ limit: '10mb' }));
 
 // ==========================================
-// 容器环境变量配置 (新增 GitHub OAuth 参数)
+// 容器环境变量配置 (含 GitHub OAuth)
 // ==========================================
 const PORT = process.env.PORT || 3000;
-const API_SECRET = process.env.API_SECRET || 'admin123'; // 仅保留用于探针节点上报数据
+const API_SECRET = process.env.API_SECRET || 'admin123'; 
 const DB_PATH = process.env.DB_PATH || '/app/data/monitor.db';
 
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || '';
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || '';
-// 允许登录的 GitHub 用户名白名单（逗号分隔），防止全网任何人都能登入你的后台！
 const GITHUB_ALLOWED_USERS = (process.env.GITHUB_ALLOWED_USERS || '').split(',').map(u => u.trim().toLowerCase()).filter(Boolean);
 
 const dbDir = path.dirname(DB_PATH);
@@ -30,7 +30,7 @@ if (!fs.existsSync(dbDir)) {
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 
-// 初始化表结构 (新增 sessions 表)
+// 初始化表结构
 db.exec(`
   CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
   CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, username TEXT, created_at INTEGER);
@@ -48,7 +48,6 @@ db.exec(`
   );
 `);
 
-// 数据库热更新 (兼容旧版字段)
 try {
     db.exec("ALTER TABLE servers ADD COLUMN ping_ct TEXT DEFAULT '0'");
     db.exec("ALTER TABLE servers ADD COLUMN ping_cu TEXT DEFAULT '0'");
@@ -56,9 +55,6 @@ try {
     db.exec("ALTER TABLE servers ADD COLUMN ping_bd TEXT DEFAULT '0'");
 } catch (e) {}
 
-// ==========================================
-// 工具函数与全局配置
-// ==========================================
 const formatBytes = (bytes) => {
     const b = parseInt(bytes);
     if (isNaN(b) || b === 0) return '0 B';
@@ -109,17 +105,15 @@ const checkWebAuth = (req) => {
     if (!token) return false;
     const session = db.prepare('SELECT * FROM sessions WHERE token = ?').get(token);
     if (session && (Date.now() - session.created_at < 7 * 24 * 3600 * 1000)) {
-        return true; // Token 有效期 7 天
+        return true; 
     }
     return false;
 };
 
 const requireWebAuth = (req, res, next) => {
     if (!checkWebAuth(req)) {
-        if (req.path.startsWith('/admin/api')) {
-            return res.status(401).json({ error: 'Unauthorized' });
-        }
-        return res.redirect('/auth/github'); // 跳转到授权页面
+        if (req.path.startsWith('/admin/api')) return res.status(401).json({ error: 'Unauthorized' });
+        return res.redirect('/auth/github'); 
     }
     next();
 };
@@ -134,7 +128,6 @@ app.get('/auth/github/callback', async (req, res) => {
     if (!code) return res.send('授权失败：未提供 Code');
 
     try {
-        // 用 Code 换取 Access Token
         const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
@@ -143,19 +136,16 @@ app.get('/auth/github/callback', async (req, res) => {
         const tokenData = await tokenRes.json();
         if (tokenData.error) return res.send('GitHub Auth Error: ' + tokenData.error_description);
 
-        // 获取 GitHub 用户信息
         const userRes = await fetch('https://api.github.com/user', {
             headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'User-Agent': 'Server-Monitor-Pro' }
         });
         const userData = await userRes.json();
         const username = (userData.login || '').toLowerCase();
 
-        // 校验用户是否在白名单中
         if (GITHUB_ALLOWED_USERS.length > 0 && !GITHUB_ALLOWED_USERS.includes(username)) {
             return res.status(403).send(`<h2>❌ 拒绝访问</h2><p>您的 GitHub 账号 (@${username}) 不在系统白名单中。</p><a href="/">返回首页</a>`);
         }
 
-        // 签发 Cookie Token
         const sessionToken = crypto.randomBytes(32).toString('hex');
         db.prepare('INSERT INTO sessions (token, username, created_at) VALUES (?, ?, ?)').run(sessionToken, username, Date.now());
 
@@ -174,9 +164,8 @@ app.get('/logout', (req, res) => {
     res.redirect('/');
 });
 
-
 // ==========================================
-// WebSocket Web SSH 终端逻辑
+// 核心升级：支持 WARP IPv6 隐形隧道的 Web SSH
 // ==========================================
 app.ws('/ssh', (ws, req) => {
     if (!checkWebAuth(req)) {
@@ -191,6 +180,9 @@ app.ws('/ssh', (ws, req) => {
         try {
             const data = JSON.parse(msg);
             if (data.type === 'connect') {
+                const targetPort = parseInt(data.port) || 22;
+                const isIPv6 = data.host.includes(':'); // 智能判断目标是否为 IPv6 地址
+
                 conn.on('ready', () => {
                     ws.send(JSON.stringify({ type: 'status', msg: '\r\n✅ SSH 认证成功，终端已连接...\r\n' }));
                     conn.shell({ term: 'xterm-color' }, (err, stream) => {
@@ -209,13 +201,47 @@ app.ws('/ssh', (ws, req) => {
                     ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 连接失败: ' + err.message + '\r\n' }));
                 }).on('keyboard-interactive', (name, instructions, instructionsLang, prompts, finish) => {
                     finish([data.password]);
-                }).connect({
-                    host: data.host, port: data.port || 22, username: data.username || 'root',
-                    password: data.password, tryKeyboard: true
                 });
-            } else if (data.type === 'data' && streamObj) streamObj.write(data.data);
-            else if (data.type === 'resize' && streamObj) streamObj.setWindow(data.rows, data.cols, 800, 600);
-        } catch (e) {}
+
+                if (isIPv6) {
+                    // 若目标为 IPv6，底层自动通过容器内的 WARP SOCKS5 (40000端口) 建立代理连接
+                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n🌐 探测到纯 IPv6 目标，正在启动 WARP 隐形隧道穿透...\r\n' }));
+                    const proxyOptions = {
+                        proxy: { ipaddress: '127.0.0.1', port: 40000, type: 5 },
+                        command: 'connect',
+                        destination: { host: data.host, port: targetPort }
+                    };
+
+                    SocksClient.createConnection(proxyOptions, (err, info) => {
+                        if (err) {
+                            ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ WARP 隧道建立失败: ' + err.message + ' (请确认 warp-plus 已启动)\r\n' }));
+                            return;
+                        }
+                        conn.connect({
+                            sock: info.socket,
+                            username: data.username || 'root',
+                            password: data.password,
+                            tryKeyboard: true
+                        });
+                    });
+                } else {
+                    // 若目标为 IPv4，走高并发原生直连
+                    conn.connect({
+                        host: data.host,
+                        port: targetPort,
+                        username: data.username || 'root',
+                        password: data.password,
+                        tryKeyboard: true
+                    });
+                }
+            } else if (data.type === 'data' && streamObj) {
+                streamObj.write(data.data);
+            } else if (data.type === 'resize' && streamObj) {
+                streamObj.setWindow(data.rows, data.cols, 800, 600);
+            }
+        } catch (e) {
+            console.error('WS Error:', e);
+        }
     });
     ws.on('close', () => conn.end());
 });
@@ -260,7 +286,7 @@ const checkOfflineNodes = async () => {
 };
 
 // ==========================================
-// 前端 UI 样式组件 
+// 前端 UI 样式组件
 // ==========================================
 const getThemeStyles = (sys) => `
     body.theme2 { background-color: #0d1117; color: #c9d1d9; }
@@ -557,7 +583,7 @@ app.get('/admin', requireWebAuth, (req, res) => {
             <button onclick="closeSshModal()" style="border:none; background:none; font-size:20px; cursor:pointer;">✖</button>
           </h3>
           <div style="display:flex; gap:10px; margin-bottom: 15px; align-items:flex-end;">
-            <div style="flex:1;"><label>IP地址</label><input type="text" id="sshHost" placeholder="192.168.1.1"></div>
+            <div style="flex:1;"><label>IP地址</label><input type="text" id="sshHost" placeholder="支持纯IPv6地址接入自动穿越"></div>
             <div style="width:80px;"><label>端口</label><input type="text" id="sshPort" value="22"></div>
             <div style="width:120px;"><label>用户名</label><input type="text" id="sshUser" value="root"></div>
             <div style="flex:1;"><label>密码</label><input type="password" id="sshPass" placeholder="SSH Password"></div>
@@ -629,7 +655,7 @@ app.get('/admin', requireWebAuth, (req, res) => {
         function copyCmd(id) {
           const input = document.getElementById('cmd-' + id);
           input.select(); document.execCommand('copy');
-          alert('✅ 一键命令已复制！覆盖安装即可生效最新脚本环境。');
+          alert('✅ 一键命令已复制！');
         }
 
         function openEditModal(id, group, price, expire, bw, traffic) {
@@ -739,7 +765,6 @@ app.get('/admin', requireWebAuth, (req, res) => {
             term.reset();
             term.writeln('\\x1b[33mConnecting to ' + host + '...\\x1b[0m');
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-            // WS 通过 Cookie 自动鉴权，不再需要传 ?token=...
             ws = new WebSocket(protocol + '//' + location.host + '/ssh');
             ws.onopen = () => {
                 ws.send(JSON.stringify({ type: 'connect', host, port, username, password }));
@@ -763,7 +788,7 @@ app.get('/admin', requireWebAuth, (req, res) => {
     res.send(html);
 });
 
-// 一键安装脚本 (不变，仍使用 API_SECRET 作为探针通信密钥)
+// 一键安装脚本
 app.get('/install.sh', (req, res) => {
     const host = `${req.protocol}://${req.get('host')}`;
     const bashScript = `#!/bin/bash
@@ -772,7 +797,7 @@ SECRET=$2
 WORKER_URL="${host}/update"
 
 if [ -z "$SERVER_ID" ] || [ -z "$SECRET" ]; then echo "错误: 缺少参数。"; exit 1; fi
-echo "开始安装探针 Agent 及 增强组件 (包含三网延迟监测)..."
+echo "开始安装探针 Agent 及 增强组件..."
 
 systemctl stop cf-probe.service 2>/dev/null
 pkill -f cf-probe.sh 2>/dev/null
@@ -942,7 +967,6 @@ echo "✅ 探针及增强模块全部安装成功！"
     res.send(bashScript);
 });
 
-// 数据上报接口 (保留使用 API_SECRET 验证)
 app.post('/update', (req, res) => {
     try {
         const { id, secret, metrics } = req.body;
@@ -1011,7 +1035,6 @@ app.post('/update-ip', (req, res) => {
 
 app.get('/api/server', (req, res) => {
     const sys = getSysSettings();
-    // 接口层也采用 WebAuth 进行防刷保护
     if (sys.is_public !== 'true' && !checkWebAuth(req)) {
         return res.status(401).send('Unauthorized');
     }
@@ -1029,11 +1052,10 @@ app.get('/api/ip-history', requireWebAuth, (req, res) => {
     res.json(history);
 });
 
-// 前台大盘展示与详情页
 app.get('/', (req, res) => {
     const sys = getSysSettings();
     if (sys.is_public !== 'true' && !checkWebAuth(req)) {
-        return res.redirect('/auth/github'); // 跳转到 GitHub 登录
+        return res.redirect('/auth/github'); 
     }
 
     const viewId = req.query.id;
