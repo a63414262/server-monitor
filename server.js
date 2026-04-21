@@ -206,7 +206,8 @@ app.ws('/ssh', (ws, req) => {
                     ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 缺少 IP 地址！\r\n' })); return;
                 }
 
-                const sshConfig = { username: authUser, privateKey: MASTER_PRIVATE_KEY, tryKeyboard: true };
+                // 修改点：加入了 password: authPass 进行兜底密码认证
+                const sshConfig = { username: authUser, privateKey: MASTER_PRIVATE_KEY, password: authPass, tryKeyboard: true };
                 const isIPv6 = targetHost.includes(':');
 
                 conn.on('ready', () => {
