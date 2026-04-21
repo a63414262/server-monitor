@@ -6,7 +6,7 @@ import Database from 'better-sqlite3';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { execSync } from 'child_process'; // 新增：用于生成标准 SSH 秘钥
+import { execSync } from 'child_process'; 
 
 const app = express();
 expressWs(app);
@@ -38,20 +38,19 @@ const PUBLIC_KEY_PATH = path.join(SSH_KEY_DIR, 'id_rsa.pub');
 
 if (!fs.existsSync(SSH_KEY_DIR)) fs.mkdirSync(SSH_KEY_DIR, { recursive: true });
 
-// 修复核心：检查旧格式错乱的秘钥并用 ssh-keygen 强制生成标准 OpenSSH 秘钥
+// 使用系统 ssh-keygen 强制生成标准 OpenSSH 秘钥，兼容所有云厂商
 let needsGen = false;
 if (!fs.existsSync(PRIVATE_KEY_PATH) || !fs.existsSync(PUBLIC_KEY_PATH)) {
     needsGen = true;
 } else {
     const pub = fs.readFileSync(PUBLIC_KEY_PATH, 'utf-8');
-    if (!pub.startsWith('ssh-rsa AAA')) needsGen = true; // 识别并淘汰旧版错误格式的秘钥
+    if (!pub.startsWith('ssh-rsa AAA')) needsGen = true; 
 }
 
 if (needsGen) {
     console.log('🔑 检测到密钥缺失或格式过旧，正在生成标准 OpenSSH 格式密钥对...');
     if (fs.existsSync(PRIVATE_KEY_PATH)) fs.unlinkSync(PRIVATE_KEY_PATH);
     if (fs.existsSync(PUBLIC_KEY_PATH)) fs.unlinkSync(PUBLIC_KEY_PATH);
-    // 使用系统的 ssh-keygen 保证 100% 兼容性
     execSync(`ssh-keygen -t rsa -b 2048 -m PEM -N "" -C "Server-Monitor-Pro-Master" -f "${PRIVATE_KEY_PATH}"`);
     console.log('✅ 主控端专属 SSH 密钥对已安全生成！');
 }
@@ -186,7 +185,7 @@ app.get('/logout', (req, res) => {
 });
 
 // ==========================================
-// Web SSH 终端逻辑 (终极带 DEBUG 透传版)
+// Web SSH 终端逻辑 (纯净正式版)
 // ==========================================
 app.ws('/ssh', (ws, req) => {
     if (!checkWebAuth(req)) {
@@ -212,17 +211,11 @@ app.ws('/ssh', (ws, req) => {
                     ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 缺少 IP 地址！\r\n' })); return;
                 }
 
-                // 【修复核心】：开启底层 Debug 日志，实时打印连接状态
+                // 去除 debug 输出，保留智能动态鉴权
                 const sshConfig = { 
                     username: authUser, 
                     tryKeyboard: true,
-                    readyTimeout: 15000,
-                    debug: (info) => {
-                        if (ws && ws.readyState === 1) {
-                            // 用灰色字体打印底层日志
-                            ws.send(JSON.stringify({ type: 'data', data: `\x1b[90m[SSH底层日志] ${info}\x1b[0m\r\n` }));
-                        }
-                    }
+                    readyTimeout: 20000
                 };
                 
                 if (authPass) {
