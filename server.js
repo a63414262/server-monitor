@@ -223,9 +223,9 @@ app.ws('/ssh', (ws, req) => {
                     finish([authPass]);
                 });
 
-                // 【核心突破】：如果目标是 IPv6，使用容器内跑在 40000 端口的 WARP 代理进行穿透！
+                // 如果目标是 IPv6，使用容器内的 WARP 代理进行穿透
                 if (isIPv6) {
-                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n🌐 探测到 IPv6 目标，通过本机 WARP 代理穿透...\r\n' }));
+                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n🌐 探测到 IPv6 目标，尝试通过本机 WARP 代理穿透...\r\n' }));
                     SocksClient.createConnection({
                         proxy: { ipaddress: '127.0.0.1', port: 40000, type: 5 },
                         command: 'connect', destination: { host: targetHost, port: targetPort }
@@ -234,7 +234,7 @@ app.ws('/ssh', (ws, req) => {
                         conn.connect({ sock: info.socket, ...sshConfig });
                     });
                 } else {
-                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n🌐 探测到 IPv4 目标，发起直连...\r\n' }));
+                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n🌐 探测到 IPv4 目标，发起原生直连...\r\n' }));
                     conn.connect({ host: targetHost, port: targetPort, ...sshConfig });
                 }
             } else if (data.type === 'data' && streamObj) streamObj.write(data.data);
@@ -339,6 +339,7 @@ const getThemeStyles = (sys) => `
     .theme2 .stat-bar { background: #21262d; }
     .theme2 .divider { background: #30363d; }
     .theme2 .card-title { color: #fff; }
+
     body.theme3 { background-color: #fef08a; color: #000; font-weight: 500; }
     .theme3 .vps-card, .global-stats, .header-card, .chart-card { background: #fff; border: 3px solid #000; border-radius: 0; box-shadow: 6px 6px 0px #000; transition: transform 0.1s, box-shadow 0.1s; }
     .theme3 .vps-card:hover { transform: translate(2px, 2px); box-shadow: 4px 4px 0px #000; border-color: #000; }
@@ -347,6 +348,7 @@ const getThemeStyles = (sys) => `
     .theme3 .stat-bar > div { border-right: 1px solid #000; }
     .theme3 .badge { border: 1px solid #000; border-radius: 0; }
     .theme3 .stat-val, .theme3 .g-val, .theme3 .card-title { font-weight: 900; color: #000; }
+
     body.theme4 { background: linear-gradient(45deg, #4facfe 0%, #00f2fe 100%); background-attachment: fixed; color: #fff; }
     .theme4 .vps-card, .theme4 .global-stats, .theme4 .header-card, .theme4 .chart-card { background: rgba(255, 255, 255, 0.2); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border: 1px solid rgba(255, 255, 255, 0.4); box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.1); color: #fff; }
     .theme4 .vps-card:hover { background: rgba(255, 255, 255, 0.3); border-color: rgba(255, 255, 255, 0.8); }
@@ -355,6 +357,7 @@ const getThemeStyles = (sys) => `
     .theme4 .stat-label, .theme4 .g-label, .theme4 .g-sub, .theme4 .card-meta { color: rgba(255,255,255,0.8); }
     .theme4 .stat-bar { background: rgba(0,0,0,0.2); }
     .theme4 .divider { background: rgba(255,255,255,0.2); }
+
     body.theme5 { background-color: #050505; color: #0ff; font-family: 'Courier New', Courier, monospace; }
     .theme5 .vps-card, .theme5 .global-stats, .theme5 .header-card, .theme5 .chart-card { background: #0b0c10; border: 1px solid #f0f; border-radius: 0; box-shadow: 0 0 10px rgba(255, 0, 255, 0.2); color: #fff; }
     .theme5 .vps-card:hover { box-shadow: 0 0 20px rgba(0, 255, 255, 0.5); border-color: #0ff; }
@@ -367,6 +370,7 @@ const getThemeStyles = (sys) => `
     .theme5 .badge-bw { background: #f0f; box-shadow: 0 0 5px #f0f; }
     .theme5 .badge-tf { background: #0ff; color:#000; box-shadow: 0 0 5px #0ff; }
     .ping-box { font-size:11px; margin-top:10px; display:flex; gap:10px; padding: 6px 8px; border-radius: 4px; flex-wrap:wrap; background: rgba(150,150,150,0.1); border: 1px solid rgba(150,150,150,0.2); }
+
     ${sys.custom_bg ? `
       body { background: url('${sys.custom_bg}') no-repeat center center fixed !important; background-size: cover !important; }
       .vps-card, .global-stats, .header-card, .chart-card { background: rgba(255, 255, 255, 0.4) !important; backdrop-filter: blur(12px) !important; -webkit-backdrop-filter: blur(12px) !important; border: 1px solid rgba(255, 255, 255, 0.6) !important; box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.1) !important; color: #111 !important; }
@@ -414,9 +418,9 @@ app.get('/admin', requireWebAuth, (req, res) => {
     <head>
       <meta charset="UTF-8">
       <title>${sys.admin_title}</title>
-      <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
-      <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
-      <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+      <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.css" />
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.js"></script>
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/addons/fit/fit.min.js"></script>
       <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 20px; background: #f0f2f5; color: #333;}
         .card { background: white; padding: 25px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); max-width: 1200px; margin: 0 auto 20px auto; position: relative;}
@@ -448,7 +452,7 @@ app.get('/admin', requireWebAuth, (req, res) => {
     </head>
     <body>
       <div class="card">
-        <a href="/logout" class="btn btn-red" style="position: absolute; right: 180px; top: 25px; font-weight: bold; padding: 8px 15px;">退出登录</a>
+        <a href="/logout" class="btn btn-red" style="position: absolute; right: 180px; top: 25px; font-weight: bold; padding: 8px 15px;">强制刷新缓存(退出登录)</a>
         <button onclick="openCalcModal()" class="btn btn-purple" style="position: absolute; right: 25px; top: 25px; font-weight: bold; padding: 8px 15px;">🧮 剩余价值计算器</button>
         <h2>🛠️ 全局设置</h2>
         <div class="settings-grid">
@@ -600,7 +604,7 @@ app.get('/admin', requireWebAuth, (req, res) => {
         async function apiCall(data) {
             const res = await fetch('/admin/api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
             if (res.status === 401) {
-                alert('⚠️ 会话已过期或主控端刚重启，请重新授权登录！');
+                alert('⚠️ 会话已过期，请点击确定后重新授权登录！');
                 location.reload(); return false;
             }
             if (!res.ok) { alert('操作失败'); return false; }
@@ -752,7 +756,7 @@ app.get('/admin', requireWebAuth, (req, res) => {
             term.writeln('Welcome to Web SSH Terminal.');
             
             if(host) {
-                term.writeln('\\x1b[36m✨ 探针已上报IP，正在进行 V4/V6 智能握手免密直连...\\x1b[0m');
+                term.writeln('\\x1b[36m✨ 探针已上报IP，正在进行 V4/V6 智能握手连接...\\x1b[0m');
                 setTimeout(connectSsh, 500);
             }
         }
@@ -793,9 +797,7 @@ app.get('/admin', requireWebAuth, (req, res) => {
     </html>`);
 });
 
-// ==========================================
-// 前台大盘展示与详情页
-// ==========================================
+// 前台大盘详情页 (更换为 Cloudflare CDN)
 app.get('/', (req, res) => {
     const sys = getSysSettings();
     if (sys.is_public !== 'true' && !checkWebAuth(req)) return res.redirect('/auth/github'); 
@@ -810,7 +812,7 @@ app.get('/', (req, res) => {
           <meta charset="UTF-8">
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
           <title>${server.name} - ${sys.site_title}</title>
-          <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+          <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
           <style>
             body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f9fafb; color: #333; margin: 0; padding: 20px; }
             .container { max-width: 1200px; margin: 0 auto; }
@@ -835,10 +837,7 @@ app.get('/', (req, res) => {
           <div class="container">
             <a href="/" class="back-btn">⬅ 返回大盘</a>
             <div class="header-card">
-              <div class="title-row">
-                <h2><span id="head-flag"></span> ${server.name}</h2>
-                <span class="status-badge" id="head-status">在线</span>
-              </div>
+              <div class="title-row"><h2><span id="head-flag"></span> ${server.name}</h2><span class="status-badge" id="head-status">在线</span></div>
               <div class="info-grid">
                 <div class="info-item"><span class="info-label">运行时间</span><span class="info-value" id="val-uptime">...</span></div>
                 <div class="info-item"><span class="info-label">架构</span><span class="info-value" id="val-arch">...</span></div>
@@ -852,10 +851,7 @@ app.get('/', (req, res) => {
             <div class="charts-grid">
               <div class="chart-card"><h3>CPU <span class="chart-val" id="text-cpu">0%</span></h3><canvas id="chartCPU"></canvas></div>
               <div class="chart-card"><h3>内存 <span class="chart-val" id="text-ram">0%</span></h3><div style="font-size:12px; color:#6b7280; margin-bottom:5px;" id="text-swap">Swap: 0 / 0</div><canvas id="chartRAM"></canvas></div>
-              <div class="chart-card">
-                <h3>国内延迟 <span class="chart-val" style="font-size:12px; font-weight:normal;">电信 <b id="t-ct">0</b> | 联通 <b id="t-cu">0</b> | 移动 <b id="t-cm">0</b> | 字节 <b id="t-bd">0</b></span></h3>
-                <canvas id="chartPing"></canvas>
-              </div>
+              <div class="chart-card"><h3>国内延迟 <span class="chart-val" style="font-size:12px; font-weight:normal;">电信 <b id="t-ct">0</b> | 联通 <b id="t-cu">0</b> | 移动 <b id="t-cm">0</b> | 字节 <b id="t-bd">0</b></span></h3><canvas id="chartPing"></canvas></div>
               <div class="chart-card"><h3>磁盘 <span class="chart-val" id="text-disk">0%</span></h3><div style="width:100%; height:20px; background:#e5e7eb; border-radius:10px; overflow:hidden; margin-top:40px;"><div id="disk-bar" style="height:100%; width:0%; background:#34d399; transition:width 0.5s;"></div></div><p style="text-align:right; font-size:12px; color:#6b7280; margin-top:8px;" id="text-disk-detail">0 / 0</p></div>
               <div class="chart-card"><h3>进程数 <span class="chart-val" id="text-proc">0</span></h3><canvas id="chartProc"></canvas></div>
               <div class="chart-card"><h3>网络速度 <span class="chart-val" style="font-size:14px;"><span style="color:#10b981">↓</span> <span id="text-net-in">0</span> | <span style="color:#3b82f6">↑</span> <span id="text-net-out">0</span></span></h3><canvas id="chartNet"></canvas></div>
@@ -865,36 +861,36 @@ app.get('/', (req, res) => {
           <script>
             const serverId = "${viewId}";
             const formatBytes = (bytes) => { const b = parseInt(bytes); if (isNaN(b) || b === 0) return '0 B'; const k = 1024; const sizes = ['B', 'KB', 'MB', 'GB', 'TB']; const i = Math.floor(Math.log(b) / Math.log(k)); return parseFloat((b / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]; };
-            const commonOptions = { responsive: true, maintainAspectRatio: false, animation: { duration: 0 }, scales: { x: { display: false }, y: { beginAtZero: true, border: { display: false } } }, plugins: { legend: { display: false }, tooltip: { enabled: false } }, elements: { point: { radius: 0 }, line: { tension: 0.4, borderWidth: 2 } } };
-            const createChart = (ctxId, color, bgColor) => { const ctx = document.getElementById(ctxId).getContext('2d'); return new Chart(ctx, { type: 'line', data: { labels: Array(30).fill(''), datasets: [{ data: Array(30).fill(0), borderColor: color, backgroundColor: bgColor, fill: true }] }, options: commonOptions }); };
             
-            const charts = { cpu: createChart('chartCPU', '#3b82f6', 'rgba(59, 130, 246, 0.1)'), ram: createChart('chartRAM', '#8b5cf6', 'rgba(139, 92, 246, 0.1)'), proc: createChart('chartProc', '#ec4899', 'rgba(236, 72, 153, 0.1)') };
-            const ctxNet = document.getElementById('chartNet').getContext('2d'); charts.net = new Chart(ctxNet, { type: 'line', data: { labels: Array(30).fill(''), datasets: [ { label: 'In', data: Array(30).fill(0), borderColor: '#10b981', borderWidth: 2, tension: 0.4, pointRadius: 0 }, { label: 'Out', data: Array(30).fill(0), borderColor: '#3b82f6', borderWidth: 2, tension: 0.4, pointRadius: 0 } ]}, options: commonOptions });
-            const ctxConn = document.getElementById('chartConn').getContext('2d'); charts.conn = new Chart(ctxConn, { type: 'line', data: { labels: Array(30).fill(''), datasets: [ { label: 'TCP', data: Array(30).fill(0), borderColor: '#6366f1', borderWidth: 2, tension: 0.4, pointRadius: 0 }, { label: 'UDP', data: Array(30).fill(0), borderColor: '#d946ef', borderWidth: 2, tension: 0.4, pointRadius: 0 } ]}, options: commonOptions });
-            const ctxPing = document.getElementById('chartPing').getContext('2d'); charts.ping = new Chart(ctxPing, { type: 'line', data: { labels: Array(30).fill(''), datasets: [ { label: '电信', data: Array(30).fill(0), borderColor: '#10b981', borderWidth: 2, tension: 0.4, pointRadius: 0 }, { label: '联通', data: Array(30).fill(0), borderColor: '#f59e0b', borderWidth: 2, tension: 0.4, pointRadius: 0 }, { label: '移动', data: Array(30).fill(0), borderColor: '#3b82f6', borderWidth: 2, tension: 0.4, pointRadius: 0 }, { label: '字节', data: Array(30).fill(0), borderColor: '#8b5cf6', borderWidth: 2, tension: 0.4, pointRadius: 0 } ] }, options: commonOptions });
+            let charts = {};
+            try {
+                const commonOptions = { responsive: true, maintainAspectRatio: false, animation: { duration: 0 }, scales: { x: { display: false }, y: { beginAtZero: true, border: { display: false } } }, plugins: { legend: { display: false }, tooltip: { enabled: false } }, elements: { point: { radius: 0 }, line: { tension: 0.4, borderWidth: 2 } } };
+                const createChart = (ctxId, color, bgColor) => { const ctx = document.getElementById(ctxId).getContext('2d'); return new Chart(ctx, { type: 'line', data: { labels: Array(30).fill(''), datasets: [{ data: Array(30).fill(0), borderColor: color, backgroundColor: bgColor, fill: true }] }, options: commonOptions }); };
+                charts = { cpu: createChart('chartCPU', '#3b82f6', 'rgba(59, 130, 246, 0.1)'), ram: createChart('chartRAM', '#8b5cf6', 'rgba(139, 92, 246, 0.1)'), proc: createChart('chartProc', '#ec4899', 'rgba(236, 72, 153, 0.1)') };
+                charts.net = new Chart(document.getElementById('chartNet').getContext('2d'), { type: 'line', data: { labels: Array(30).fill(''), datasets: [ { label: 'In', data: Array(30).fill(0), borderColor: '#10b981', borderWidth: 2, tension: 0.4, pointRadius: 0 }, { label: 'Out', data: Array(30).fill(0), borderColor: '#3b82f6', borderWidth: 2, tension: 0.4, pointRadius: 0 } ]}, options: commonOptions });
+                charts.conn = new Chart(document.getElementById('chartConn').getContext('2d'), { type: 'line', data: { labels: Array(30).fill(''), datasets: [ { label: 'TCP', data: Array(30).fill(0), borderColor: '#6366f1', borderWidth: 2, tension: 0.4, pointRadius: 0 }, { label: 'UDP', data: Array(30).fill(0), borderColor: '#d946ef', borderWidth: 2, tension: 0.4, pointRadius: 0 } ]}, options: commonOptions });
+                charts.ping = new Chart(document.getElementById('chartPing').getContext('2d'), { type: 'line', data: { labels: Array(30).fill(''), datasets: [ { label: '电信', data: Array(30).fill(0), borderColor: '#10b981', borderWidth: 2, tension: 0.4, pointRadius: 0 }, { label: '联通', data: Array(30).fill(0), borderColor: '#f59e0b', borderWidth: 2, tension: 0.4, pointRadius: 0 }, { label: '移动', data: Array(30).fill(0), borderColor: '#3b82f6', borderWidth: 2, tension: 0.4, pointRadius: 0 }, { label: '字节', data: Array(30).fill(0), borderColor: '#8b5cf6', borderWidth: 2, tension: 0.4, pointRadius: 0 } ] }, options: commonOptions });
+            } catch(e) { console.error('图表加载失败，已降级为纯文本模式', e); }
 
-            const updateChartData = (chart, newData, datasetIndex = 0) => { const dataArr = chart.data.datasets[datasetIndex].data; dataArr.push(newData); dataArr.shift(); chart.update(); };
+            const updateChartData = (chart, newData, datasetIndex = 0) => { if(!chart) return; const dataArr = chart.data.datasets[datasetIndex].data; dataArr.push(newData); dataArr.shift(); chart.update(); };
 
             async function fetchData() {
               try {
                 const res = await fetch('/api/server?id=' + serverId); const data = await res.json();
-                const cCode = (data.country || 'xx').toLowerCase();
-                document.getElementById('head-flag').innerHTML = cCode !== 'xx' ? \`<img src="https://flagcdn.com/24x18/\${cCode}.png" alt="\${cCode}" style="vertical-align: middle; margin-right: 8px; border-radius: 2px;">\` : '🏳️ ';
+                const cCode = (data.country || 'xx').toLowerCase(); document.getElementById('head-flag').innerHTML = cCode !== 'xx' ? \`<img src="https://flagcdn.com/24x18/\${cCode}.png" alt="\${cCode}" style="vertical-align: middle; margin-right: 8px; border-radius: 2px;">\` : '🏳️ ';
                 document.getElementById('val-uptime').innerText = data.uptime || 'N/A'; document.getElementById('val-arch').innerText = data.arch || 'N/A'; document.getElementById('val-os').innerText = data.os || 'N/A'; document.getElementById('val-cpuinfo').innerText = data.cpu_info || 'N/A'; document.getElementById('val-load').innerText = data.load_avg || '0.00'; document.getElementById('val-boot').innerText = data.boot_time || 'N/A'; document.getElementById('val-traffic').innerText = formatBytes(data.net_tx) + ' / ' + formatBytes(data.net_rx);
-                const isOnline = (Date.now() - data.last_updated) < 30000;
-                const badge = document.getElementById('head-status'); badge.innerText = isOnline ? '在线' : '离线'; badge.style.background = isOnline ? '#10b981' : '#ef4444';
+                const isOnline = (Date.now() - data.last_updated) < 30000; const badge = document.getElementById('head-status'); badge.innerText = isOnline ? '在线' : '离线'; badge.style.background = isOnline ? '#10b981' : '#ef4444';
                 if(!isOnline) return;
                 
                 document.getElementById('text-cpu').innerText = data.cpu + '%'; document.getElementById('text-ram').innerText = data.ram + '%'; document.getElementById('text-swap').innerText = 'Swap: ' + data.swap_used + ' MiB / ' + data.swap_total + ' MiB'; document.getElementById('text-proc').innerText = data.processes || '0'; document.getElementById('text-net-in').innerText = formatBytes(data.net_in_speed) + '/s'; document.getElementById('text-net-out').innerText = formatBytes(data.net_out_speed) + '/s'; document.getElementById('text-tcp').innerText = data.tcp_conn || '0'; document.getElementById('text-udp').innerText = data.udp_conn || '0';
-                
-                let diskTotal = parseFloat(data.disk_total) || 0; let diskUsed = parseFloat(data.disk_used) || 0; let diskPct = parseInt(data.disk) || 0;
-                document.getElementById('text-disk').innerText = diskPct + '%'; document.getElementById('disk-bar').style.width = diskPct + '%'; document.getElementById('text-disk-detail').innerText = (diskUsed/1024).toFixed(2) + ' GiB / ' + (diskTotal/1024).toFixed(2) + ' GiB';
-                
+                let diskTotal = parseFloat(data.disk_total) || 0; let diskUsed = parseFloat(data.disk_used) || 0; let diskPct = parseInt(data.disk) || 0; document.getElementById('text-disk').innerText = diskPct + '%'; document.getElementById('disk-bar').style.width = diskPct + '%'; document.getElementById('text-disk-detail').innerText = (diskUsed/1024).toFixed(2) + ' GiB / ' + (diskTotal/1024).toFixed(2) + ' GiB';
                 document.getElementById('t-ct').innerText = data.ping_ct + 'ms'; document.getElementById('t-cu').innerText = data.ping_cu + 'ms'; document.getElementById('t-cm').innerText = data.ping_cm + 'ms'; document.getElementById('t-bd').innerText = data.ping_bd + 'ms';
 
-                updateChartData(charts.cpu, parseFloat(data.cpu) || 0); updateChartData(charts.ram, parseFloat(data.ram) || 0); updateChartData(charts.proc, parseInt(data.processes) || 0); updateChartData(charts.net, parseFloat(data.net_in_speed) || 0, 0); updateChartData(charts.net, parseFloat(data.net_out_speed) || 0, 1); updateChartData(charts.conn, parseInt(data.tcp_conn) || 0, 0); updateChartData(charts.conn, parseInt(data.udp_conn) || 0, 1);
-                updateChartData(charts.ping, parseInt(data.ping_ct) || 0, 0); updateChartData(charts.ping, parseInt(data.ping_cu) || 0, 1); updateChartData(charts.ping, parseInt(data.ping_cm) || 0, 2); updateChartData(charts.ping, parseInt(data.ping_bd) || 0, 3);
-              } catch (e) {}
+                if(Object.keys(charts).length > 0) {
+                    updateChartData(charts.cpu, parseFloat(data.cpu) || 0); updateChartData(charts.ram, parseFloat(data.ram) || 0); updateChartData(charts.proc, parseInt(data.processes) || 0); updateChartData(charts.net, parseFloat(data.net_in_speed) || 0, 0); updateChartData(charts.net, parseFloat(data.net_out_speed) || 0, 1); updateChartData(charts.conn, parseInt(data.tcp_conn) || 0, 0); updateChartData(charts.conn, parseInt(data.udp_conn) || 0, 1);
+                    updateChartData(charts.ping, parseInt(data.ping_ct) || 0, 0); updateChartData(charts.ping, parseInt(data.ping_cu) || 0, 1); updateChartData(charts.ping, parseInt(data.ping_cm) || 0, 2); updateChartData(charts.ping, parseInt(data.ping_bd) || 0, 3);
+                }
+              } catch (e) { console.log('FetchData Wait:', e); }
             }
             setInterval(fetchData, 2000); fetchData();
           </script>
@@ -1045,7 +1041,7 @@ app.get('/update-pubkey', (req, res) => {
 });
 
 // ==========================================
-// 极简探针安装脚本：无 WARP 污染，只注入公钥
+// 极简探针安装脚本：不碰客户端网络，只注入公钥
 // ==========================================
 app.get('/install.sh', (req, res) => {
     const host = `${req.protocol}://${req.get('host')}`;
@@ -1058,7 +1054,7 @@ WORKER_URL="${host}/update"
 if [ -z "\$SERVER_ID" ] || [ -z "\$SECRET" ]; then echo "错误: 缺少参数。"; exit 1; fi
 
 echo "=================================================="
-echo "🚀 开始安装探针 Agent 及 注入公网免密公钥"
+echo "🚀 开始安装探针 Agent 及 注入直连公钥"
 echo "=================================================="
 
 systemctl stop cf-probe.service 2>/dev/null
@@ -1069,7 +1065,7 @@ SSH_PORT=\$(sshd -T 2>/dev/null | awk '/^port /{print \$2}' | head -n1)
 SSH_PORT=\${SSH_PORT:-22}
 
 # ==========================================
-# 阶段 1: 从主控面板安全拉取公钥并注入
+# 阶段 1: 从主控面板拉取最新公钥并注入
 # ==========================================
 echo "正在拉取面板公钥..."
 MASTER_PUB_KEY=\$(curl -sL "${host}/update-pubkey")
@@ -1131,7 +1127,7 @@ while true; do
     PING_CM=\$(get_http_ping "\${CM_NODES[\$RANDOM % \${#CM_NODES[@]}]}")
     PING_BD=\$(get_http_ping "lf3-ips.zstaticcdn.com")
     
-    # 获取最真实的机器公网 IP
+    # 直接抓取服务器自身的出站 IP (如果是纯 IPv6 会自动抓到 V6)
     REAL_IPV4=\$(curl -s4 -m 3 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | awk -F= '/ip=/{print \$2}')
     REAL_IPV6=\$(curl -s6 -m 3 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | awk -F= '/ip=/{print \$2}')
     BEST_IP="\${REAL_IPV4:-\$REAL_IPV6}"
@@ -1244,7 +1240,7 @@ RAND_MIN=\$((RANDOM % 60))
 
 nohup /usr/local/bin/cf-ip-check.sh $SERVER_ID $SECRET "${host}/update-ip" > /dev/null 2>&1 &
 
-echo "✅ 探针及公网秘钥注入安装成功！"
+echo "✅ 探针及公网秘钥注入安装成功！现在可以在面板直接秒连 SSH！"
 `;
     res.setHeader('Content-Type', 'text/plain;charset=UTF-8');
     res.send(bashScript);
@@ -1302,5 +1298,5 @@ app.post('/update-ip', (req, res) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server Monitor Pro running on port ${PORT}`);
+    console.log(`Server Monitor Pro (V4 to V6 Bridge) running on port ${PORT}`);
 });
