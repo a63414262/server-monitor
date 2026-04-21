@@ -1,10 +1,14 @@
 import express from 'express';
+import expressWs from 'express-ws';
+import { Client } from 'ssh2';
 import Database from 'better-sqlite3';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
 const app = express();
+// 绑定 WebSocket 支持
+expressWs(app);
 app.use(express.json({ limit: '10mb' }));
 
 // ==========================================
@@ -14,13 +18,11 @@ const PORT = process.env.PORT || 3000;
 const API_SECRET = process.env.API_SECRET || 'admin123';
 const DB_PATH = process.env.DB_PATH || '/app/data/monitor.db';
 
-// 初始化数据库目录 (确保挂载的 /app/data 目录存在)
 const dbDir = path.dirname(DB_PATH);
 if (!fs.existsSync(dbDir)) {
     fs.mkdirSync(dbDir, { recursive: true });
 }
 
-// 初始化 SQLite (开启 WAL 模式提升并发性能)
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 
@@ -51,7 +53,7 @@ const formatBytes = (bytes) => {
 const getSysSettings = () => {
     let sys = {
         site_title: '⚡ Server Monitor Pro',
-        admin_title: '⚙️ 探针管理后台',
+        admin_title: '⚙️ 资产与探针控制台',
         theme: 'theme1', 
         custom_bg: '',
         is_public: 'true',
@@ -71,23 +73,89 @@ const getSysSettings = () => {
 };
 
 const checkAuth = (req) => {
-    const authHeader = req.headers.authorization;
-    if (!authHeader) return false;
-    const [scheme, encoded] = authHeader.split(' ');
-    if (scheme !== 'Basic' || !encoded) return false;
-    const decoded = Buffer.from(encoded, 'base64').toString('utf-8');
-    const [username, password] = decoded.split(':');
-    return username === 'admin' && password === API_SECRET;
+    // 兼容 HTTP 拦截和 WebSocket URL 传参鉴权
+    let token = '';
+    if (req.headers.authorization) {
+        const parts = req.headers.authorization.split(' ');
+        if (parts[0] === 'Basic' && parts[1]) {
+            const decoded = Buffer.from(parts[1], 'base64').toString('utf-8');
+            token = decoded.split(':')[1];
+        }
+    } else if (req.query && req.query.token) {
+        token = req.query.token;
+    }
+    return token === API_SECRET;
 };
 
 const requireAuth = (req, res, next) => {
     if (!checkAuth(req)) {
-        // 修复：必须使用纯 ASCII 字符，避免 Node.js 抛出 Invalid character in header 错误
         res.setHeader('WWW-Authenticate', 'Basic realm="Admin Area"');
         return res.status(401).send('Unauthorized');
     }
     next();
 };
+
+// ==========================================
+// WebSocket Web SSH 终端逻辑 (核心新增)
+// ==========================================
+app.ws('/ssh', (ws, req) => {
+    if (!checkAuth(req)) {
+        ws.send(JSON.stringify({ type: 'error', msg: 'Unauthorized' }));
+        ws.close();
+        return;
+    }
+
+    const conn = new Client();
+    let streamObj = null;
+
+    ws.on('message', (msg) => {
+        try {
+            const data = JSON.parse(msg);
+            if (data.type === 'connect') {
+                conn.on('ready', () => {
+                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n✅ SSH 认证成功，终端已连接...\r\n' }));
+                    conn.shell({ term: 'xterm-color' }, (err, stream) => {
+                        if (err) {
+                            ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ Shell 创建失败: ' + err.message + '\r\n' }));
+                            return;
+                        }
+                        streamObj = stream;
+                        
+                        stream.on('data', (d) => {
+                            ws.send(JSON.stringify({ type: 'data', data: d.toString('utf-8') }));
+                        });
+                        
+                        stream.on('close', () => {
+                            ws.send(JSON.stringify({ type: 'status', msg: '\r\n🔌 SSH 连接已断开。\r\n' }));
+                            conn.end();
+                            ws.close();
+                        });
+                    });
+                }).on('error', (err) => {
+                    ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 连接失败: ' + err.message + '\r\n' }));
+                }).on('keyboard-interactive', (name, instructions, instructionsLang, prompts, finish) => {
+                    finish([data.password]);
+                }).connect({
+                    host: data.host,
+                    port: data.port || 22,
+                    username: data.username || 'root',
+                    password: data.password,
+                    tryKeyboard: true
+                });
+            } else if (data.type === 'data' && streamObj) {
+                streamObj.write(data.data);
+            } else if (data.type === 'resize' && streamObj) {
+                streamObj.setWindow(data.rows, data.cols, 800, 600);
+            }
+        } catch (e) {
+            console.error('WS Error:', e);
+        }
+    });
+
+    ws.on('close', () => {
+        conn.end();
+    });
+});
 
 // ==========================================
 // Telegram 离线通知
@@ -246,6 +314,7 @@ app.post('/admin/api', requireAuth, (req, res) => {
     }
 });
 
+// 后台渲染 UI (新增 SSH 与计算器模块)
 app.get('/admin', requireAuth, (req, res) => {
     const sys = getSysSettings();
     const results = db.prepare('SELECT id, name, last_updated, server_group, price, expire_date, bandwidth, traffic_limit FROM servers').all();
@@ -266,8 +335,9 @@ app.get('/admin', requireAuth, (req, res) => {
                     <td>${status}</td>
                     <td>
                         <input type="text" readonly value="${cmd}" style="width:280px; padding:6px; margin-right:5px; border:1px solid #ccc; border-radius:4px;" id="cmd-${s.id}">
-                        <button onclick="copyCmd('${s.id}')" class="btn btn-green">复制命令</button>
+                        <button onclick="copyCmd('${s.id}')" class="btn btn-gray">复制命令</button>
                         <button onclick="openEditModal('${s.id}', '${s.server_group||''}', '${s.price||''}', '${s.expire_date||''}', '${s.bandwidth||''}', '${s.traffic_limit||''}')" class="btn btn-blue">✏️ 编辑</button>
+                        <button onclick="openSshModal('${s.name}')" class="btn btn-green">💻 SSH</button>
                         <button onclick="deleteServer('${s.id}')" class="btn btn-red">🗑️ 删除</button>
                     </td>
                 </tr>
@@ -280,30 +350,44 @@ app.get('/admin', requireAuth, (req, res) => {
     <head>
       <meta charset="UTF-8">
       <title>${sys.admin_title}</title>
+      <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+      <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+      <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+
       <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 20px; background: #f0f2f5; color: #333;}
-        .card { background: white; padding: 25px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); max-width: 1100px; margin: 0 auto 20px auto; }
+        .card { background: white; padding: 25px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); max-width: 1200px; margin: 0 auto 20px auto; position: relative;}
         h2 { margin-top: 0; border-bottom: 2px solid #f0f2f5; padding-bottom: 10px; font-size: 20px;}
         table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px; }
         th, td { border: 1px solid #eee; padding: 12px; text-align: left; }
         th { background: #f8f9fa; }
         .btn { cursor: pointer; border-radius: 4px; font-size: 13px; transition: opacity 0.2s; border: none; padding: 6px 10px; color: white; margin-left: 5px; }
         .btn:hover { opacity: 0.8; }
-        .btn-blue { background: #3b82f6; } .btn-green { background: #10b981; } .btn-red { background: #ef4444; } .btn-gray { background: #6b7280; }
+        .btn-blue { background: #3b82f6; } .btn-green { background: #10b981; } .btn-red { background: #ef4444; } .btn-gray { background: #6b7280; } .btn-purple { background: #8b5cf6; }
         .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
         .form-group { display: flex; flex-direction: column; margin-bottom: 15px; }
         .form-group label { font-size: 14px; font-weight: 600; margin-bottom: 6px; color: #555;}
-        .form-group input[type="text"], .form-group select { padding: 10px; border: 1px solid #ccc; border-radius: 6px; }
+        .form-group input[type="text"], .form-group input[type="number"], .form-group input[type="date"], .form-group select { padding: 10px; border: 1px solid #ccc; border-radius: 6px; }
         .checkbox-group { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 14px;}
         .checkbox-group input { width: 18px; height: 18px; cursor: pointer; }
         .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 100; }
         .modal-content { background: white; padding: 20px; border-radius: 8px; width: 400px; margin: 100px auto; position: relative;}
+        .modal-large { width: 850px; margin: 50px auto; }
         .modal input { width: 100%; padding: 8px; margin-bottom: 12px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;}
         .modal label { font-size: 14px; color: #555; display: block; margin-bottom: 4px; font-weight: bold;}
+        
+        /* 终端容器 */
+        #terminal-container { height: 450px; background: #000; padding: 10px; border-radius: 6px; margin-top: 15px; }
+        .preset-btns { display: flex; gap: 8px; margin-bottom: 15px; flex-wrap: wrap; }
+        .preset-btn { background: #e5e7eb; border: 1px solid #d1d5db; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; font-family: monospace; color: #374151; }
+        .preset-btn:hover { background: #d1d5db; }
+        .calc-result { background: #f3f4f6; padding: 15px; border-radius: 6px; margin-top: 15px; border-left: 4px solid #10b981; }
+        .calc-result strong { color: #10b981; font-size: 20px; }
       </style>
     </head>
     <body>
       <div class="card">
+        <button onclick="openCalcModal()" class="btn btn-purple" style="position: absolute; right: 25px; top: 25px; font-weight: bold; padding: 8px 15px;">🧮 剩余价值计算器</button>
         <h2>🛠️ 全局设置</h2>
         <div class="settings-grid">
           <div>
@@ -376,15 +460,85 @@ app.get('/admin', requireAuth, (req, res) => {
           <label>带宽 (前端徽章)</label> <input type="text" id="editBandwidth" placeholder="如：1Gbps 或 200Mbps">
           <label>流量总量 (前端徽章)</label> <input type="text" id="editTraffic" placeholder="如：1TB/月">
           <div style="text-align: right; margin-top: 10px;">
-            <button onclick="closeModal()" style="padding: 8px 15px; border: 1px solid #ccc; background: white; margin-right: 5px; cursor:pointer;">取消</button>
+            <button onclick="closeModal('editModal')" style="padding: 8px 15px; border: 1px solid #ccc; background: white; margin-right: 5px; cursor:pointer;">取消</button>
             <button onclick="saveEdit()" class="btn btn-blue" style="padding: 8px 15px;">保存更改</button>
           </div>
+        </div>
+      </div>
+
+      <div id="calcModal" class="modal">
+        <div class="modal-content">
+          <h3 style="margin-top:0;">🧮 VPS 剩余价值计算器</h3>
+          <div class="form-group">
+            <label>原价/购买金额 (比如 USD或CNY)</label>
+            <input type="number" id="calcPrice" placeholder="例如: 39.9">
+          </div>
+          <div class="form-group">
+            <label>购买周期</label>
+            <select id="calcCycle">
+              <option value="365">年付 (365天)</option>
+              <option value="180">半年付 (180天)</option>
+              <option value="90">季付 (90天)</option>
+              <option value="30">月付 (30天)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>到期时间</label>
+            <input type="date" id="calcExpire">
+          </div>
+          <div class="form-group">
+            <label>溢价 / 砍价 (正数为溢价，负数为砍价)</label>
+            <input type="number" id="calcPremium" value="0" placeholder="例如: 10 或 -5">
+          </div>
+          
+          <button onclick="calculateValue()" class="btn btn-purple" style="width: 100%; padding: 10px; font-size: 15px;">🚀 开始计算</button>
+          
+          <div id="calcResult" class="calc-result" style="display:none;">
+            <div>剩余天数: <span id="resDays">0</span> 天</div>
+            <div>日均成本: <span id="resDaily">0</span></div>
+            <div style="margin-top:10px;">明盘建议价: <br><strong id="resFinal">0.00</strong></div>
+          </div>
+
+          <div style="text-align: right; margin-top: 15px;">
+            <button onclick="closeModal('calcModal')" style="padding: 8px 15px; border: 1px solid #ccc; background: white; cursor:pointer;">关闭</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="sshModal" class="modal">
+        <div class="modal-content modal-large">
+          <h3 style="margin-top:0; display:flex; justify-content:space-between; align-items:center;">
+            <span>💻 Web SSH 直连 - <span id="sshTargetName"></span></span>
+            <button onclick="closeSshModal()" style="border:none; background:none; font-size:20px; cursor:pointer;">✖</button>
+          </h3>
+          
+          <div style="display:flex; gap:10px; margin-bottom: 15px; align-items:flex-end;">
+            <div style="flex:1;"><label>IP地址</label><input type="text" id="sshHost" placeholder="192.168.1.1"></div>
+            <div style="width:80px;"><label>端口</label><input type="text" id="sshPort" value="22"></div>
+            <div style="width:120px;"><label>用户名</label><input type="text" id="sshUser" value="root"></div>
+            <div style="flex:1;"><label>密码</label><input type="password" id="sshPass" placeholder="SSH Password"></div>
+            <button onclick="connectSsh()" class="btn btn-green" style="padding: 10px 20px; margin-bottom:12px;">⚡ 连接</button>
+          </div>
+
+          <div class="preset-btns">
+            <button class="preset-btn" onclick="sendCmd('clear\\n')">🧹 清屏</button>
+            <button class="preset-btn" onclick="sendCmd('apt update && apt upgrade -y\\n')">🔄 更新系统</button>
+            <button class="preset-btn" onclick="sendCmd('wget -qO- bench.sh | bash\\n')">🚀 测速脚本 (bench.sh)</button>
+            <button class="preset-btn" onclick="sendCmd('curl -sL yabs.sh | bash\\n')">🛠️ 综合测试 (yabs.sh)</button>
+            <button class="preset-btn" onclick="sendCmd('top\\n')">📊 查看 Top</button>
+            <button class="preset-btn" onclick="sendCmd('df -h\\n')">💾 磁盘信息</button>
+          </div>
+
+          <div id="terminal-container"></div>
         </div>
       </div>
       
       ${footerHtml}
 
       <script>
+        const API_SECRET = '${API_SECRET}'; // 前端获取 Token 供 WS 鉴权
+
+        // 文件上传转 Base64
         function uploadBg(input) {
           const file = input.files[0];
           if(!file) return;
@@ -418,22 +572,26 @@ app.get('/admin', requireAuth, (req, res) => {
           const res = await fetch('/admin/api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
           if (res.ok) { alert('✅ 设置已保存！'); location.reload(); } else alert('保存失败');
         }
+
         async function addServer() {
           const name = document.getElementById('newName').value;
           if (!name) return alert('请输入名称');
           const res = await fetch('/admin/api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'add', name }) });
           if (res.ok) location.reload(); else alert('添加失败');
         }
+
         async function deleteServer(id) {
           if (!confirm('确定要删除这个节点吗？')) return;
           const res = await fetch('/admin/api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'delete', id }) });
           if (res.ok) location.reload(); else alert('删除失败');
         }
+
         function copyCmd(id) {
           const input = document.getElementById('cmd-' + id);
           input.select(); document.execCommand('copy');
           alert('✅ 一键命令已复制！');
         }
+
         function openEditModal(id, group, price, expire, bw, traffic) {
           document.getElementById('editId').value = id;
           document.getElementById('editGroup').value = group || '默认分组';
@@ -443,7 +601,9 @@ app.get('/admin', requireAuth, (req, res) => {
           document.getElementById('editTraffic').value = traffic || '';
           document.getElementById('editModal').style.display = 'block';
         }
-        function closeModal() { document.getElementById('editModal').style.display = 'none'; }
+
+        function closeModal(id) { document.getElementById(id).style.display = 'none'; }
+
         async function saveEdit() {
           const data = {
             action: 'edit', id: document.getElementById('editId').value,
@@ -454,12 +614,126 @@ app.get('/admin', requireAuth, (req, res) => {
           const res = await fetch('/admin/api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
           if (res.ok) location.reload(); else alert('保存失败');
         }
+
+        // ==============================
+        // 剩余价值计算器逻辑
+        // ==============================
+        function openCalcModal() {
+            document.getElementById('calcModal').style.display = 'block';
+        }
+
+        function calculateValue() {
+            const price = parseFloat(document.getElementById('calcPrice').value);
+            const cycle = parseInt(document.getElementById('calcCycle').value);
+            const expireDate = new Date(document.getElementById('calcExpire').value);
+            const premium = parseFloat(document.getElementById('calcPremium').value) || 0;
+            
+            if (isNaN(price) || isNaN(expireDate.getTime())) {
+                alert('请填写正确的金额和到期日期！');
+                return;
+            }
+
+            const now = new Date();
+            const timeDiff = expireDate.getTime() - now.getTime();
+            const remainDays = Math.ceil(timeDiff / (1000 * 3600 * 24));
+
+            if (remainDays <= 0) {
+                alert('该机器已到期或即将到期，剩余价值为 0');
+                return;
+            }
+
+            const dailyPrice = price / cycle;
+            const residualValue = dailyPrice * remainDays;
+            const finalPrice = residualValue + premium;
+
+            document.getElementById('resDays').innerText = remainDays;
+            document.getElementById('resDaily').innerText = dailyPrice.toFixed(4);
+            document.getElementById('resFinal').innerText = Math.max(0, finalPrice).toFixed(2);
+            document.getElementById('calcResult').style.display = 'block';
+        }
+
+        // ==============================
+        // Web SSH 终端逻辑 (xterm.js)
+        // ==============================
+        let term, fitAddon, ws;
+
+        function openSshModal(name) {
+            document.getElementById('sshTargetName').innerText = name;
+            document.getElementById('sshModal').style.display = 'block';
+            
+            if (!term) {
+                term = new Terminal({ cursorBlink: true, theme: { background: '#000' } });
+                fitAddon = new FitAddon.FitAddon();
+                term.loadAddon(fitAddon);
+                term.open(document.getElementById('terminal-container'));
+                fitAddon.fit();
+                term.writeln('Welcome to Web SSH Terminal.');
+                term.writeln('Please enter credentials and click Connect.');
+            }
+        }
+
+        function closeSshModal() {
+            document.getElementById('sshModal').style.display = 'none';
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.close();
+            }
+        }
+
+        function connectSsh() {
+            const host = document.getElementById('sshHost').value;
+            const port = document.getElementById('sshPort').value;
+            const username = document.getElementById('sshUser').value;
+            const password = document.getElementById('sshPass').value;
+
+            if (!host || !password) return alert('请输入IP和密码');
+
+            if (ws) ws.close();
+            term.reset();
+            term.writeln('\\x1b[33mConnecting to ' + host + '...\\x1b[0m');
+
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(protocol + '//' + location.host + '/ssh?token=' + API_SECRET);
+
+            ws.onopen = () => {
+                ws.send(JSON.stringify({ type: 'connect', host, port, username, password }));
+                
+                term.onData(data => {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: 'data', data }));
+                    }
+                });
+            };
+
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                if (msg.type === 'data') {
+                    term.write(msg.data);
+                } else if (msg.type === 'status') {
+                    term.write(msg.msg);
+                } else if (msg.type === 'error') {
+                    term.write('\\x1b[31m' + msg.msg + '\\x1b[0m');
+                }
+            };
+            
+            ws.onclose = () => { term.writeln('\\r\\n\\x1b[31mConnection closed.\\x1b[0m'); };
+        }
+
+        function sendCmd(cmd) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'data', data: cmd }));
+                term.focus();
+            } else {
+                alert('请先连接服务器！');
+            }
+        }
+
       </script>
     </body>
     </html>`;
     res.send(html);
 });
 
+// 一键安装脚本
 app.get('/install.sh', (req, res) => {
     const host = `${req.protocol}://${req.get('host')}`;
     const bashScript = `#!/bin/bash
@@ -621,7 +895,6 @@ app.post('/update', (req, res) => {
 app.get('/api/server', (req, res) => {
     const sys = getSysSettings();
     if (sys.is_public !== 'true' && !checkAuth(req)) {
-        // 修复：必须使用纯 ASCII 字符
         res.setHeader('WWW-Authenticate', 'Basic realm="Secure Area"');
         return res.status(401).send('Unauthorized');
     }
@@ -635,7 +908,6 @@ app.get('/api/server', (req, res) => {
 app.get('/', (req, res) => {
     const sys = getSysSettings();
     if (sys.is_public !== 'true' && !checkAuth(req)) {
-        // 修复：必须使用纯 ASCII 字符
         res.setHeader('WWW-Authenticate', 'Basic realm="Secure Area"');
         return res.status(401).send('Unauthorized');
     }
@@ -726,7 +998,7 @@ app.get('/', (req, res) => {
                 updateChartData(charts.cpu, parseFloat(data.cpu) || 0); updateChartData(charts.ram, parseFloat(data.ram) || 0); updateChartData(charts.proc, parseInt(data.processes) || 0); updateChartData(charts.net, parseFloat(data.net_in_speed) || 0, 0); updateChartData(charts.net, parseFloat(data.net_out_speed) || 0, 1); updateChartData(charts.conn, parseInt(data.tcp_conn) || 0, 0); updateChartData(charts.conn, parseInt(data.udp_conn) || 0, 1);
               } catch (e) {}
             }
-            setInterval(fetchData, 3000); fetchData();
+            setInterval(fetchData, 2000); fetchData();
           </script>
         </body>
         </html>`;
