@@ -48,11 +48,18 @@ db.exec(`
   );
 `);
 
+// 数据库热更新：自动追加 SSH 保存凭据字段
 try {
     db.exec("ALTER TABLE servers ADD COLUMN ping_ct TEXT DEFAULT '0'");
     db.exec("ALTER TABLE servers ADD COLUMN ping_cu TEXT DEFAULT '0'");
     db.exec("ALTER TABLE servers ADD COLUMN ping_cm TEXT DEFAULT '0'");
     db.exec("ALTER TABLE servers ADD COLUMN ping_bd TEXT DEFAULT '0'");
+    
+    // 【核心新增】
+    db.exec("ALTER TABLE servers ADD COLUMN ssh_host TEXT DEFAULT ''");
+    db.exec("ALTER TABLE servers ADD COLUMN ssh_port TEXT DEFAULT '22'");
+    db.exec("ALTER TABLE servers ADD COLUMN ssh_user TEXT DEFAULT 'root'");
+    db.exec("ALTER TABLE servers ADD COLUMN ssh_pass TEXT DEFAULT ''");
 } catch (e) {}
 
 const formatBytes = (bytes) => {
@@ -362,8 +369,8 @@ app.post('/admin/api', requireWebAuth, (req, res) => {
             const id = crypto.randomUUID();
             db.prepare(`
                 INSERT INTO servers 
-                (id, name, cpu, ram, disk, load_avg, uptime, last_updated, ram_total, net_rx, net_tx, net_in_speed, net_out_speed, os, cpu_info, country, server_group, price, expire_date, bandwidth, traffic_limit, ip_v4, ip_v6, ping_ct, ping_cu, ping_cm, ping_bd) 
-                VALUES (?, ?, '0', '0', '0', '0', '0', 0, '0', '0', '0', '0', '0', '', '', '', '默认分组', '免费', '', '', '', '0', '0', '0', '0', '0', '0')
+                (id, name, cpu, ram, disk, load_avg, uptime, last_updated, ram_total, net_rx, net_tx, net_in_speed, net_out_speed, os, cpu_info, country, server_group, price, expire_date, bandwidth, traffic_limit, ip_v4, ip_v6, ping_ct, ping_cu, ping_cm, ping_bd, ssh_host, ssh_port, ssh_user, ssh_pass) 
+                VALUES (?, ?, '0', '0', '0', '0', '0', 0, '0', '0', '0', '0', '0', '', '', '', '默认分组', '免费', '', '', '', '0', '0', '0', '0', '0', '0', '', '22', 'root', '')
             `).run(id, data.name || 'New Server');
             res.json({ success: true });
         } 
@@ -372,8 +379,8 @@ app.post('/admin/api', requireWebAuth, (req, res) => {
             res.json({ success: true });
         } 
         else if (data.action === 'edit') {
-            db.prepare(`UPDATE servers SET server_group = ?, price = ?, expire_date = ?, bandwidth = ?, traffic_limit = ? WHERE id = ?`)
-              .run(data.server_group || '默认分组', data.price || '', data.expire_date || '', data.bandwidth || '', data.traffic_limit || '', data.id);
+            db.prepare(`UPDATE servers SET server_group = ?, price = ?, expire_date = ?, bandwidth = ?, traffic_limit = ?, ssh_host = ?, ssh_port = ?, ssh_user = ?, ssh_pass = ? WHERE id = ?`)
+              .run(data.server_group || '默认分组', data.price || '', data.expire_date || '', data.bandwidth || '', data.traffic_limit || '', data.ssh_host || '', data.ssh_port || '22', data.ssh_user || 'root', data.ssh_pass || '', data.id);
             res.json({ success: true });
         }
     } catch (e) { res.status(400).json({ error: e.message }); }
@@ -382,7 +389,7 @@ app.post('/admin/api', requireWebAuth, (req, res) => {
 // 后台渲染 UI
 app.get('/admin', requireWebAuth, (req, res) => {
     const sys = getSysSettings();
-    const results = db.prepare('SELECT id, name, last_updated, server_group, price, expire_date, bandwidth, traffic_limit FROM servers').all();
+    const results = db.prepare('SELECT id, name, last_updated, server_group, price, expire_date, bandwidth, traffic_limit, ssh_host, ssh_port, ssh_user, ssh_pass FROM servers').all();
     const now = Date.now();
     const host = `${req.protocol}://${req.get('host')}`;
     
@@ -393,6 +400,7 @@ app.get('/admin', requireWebAuth, (req, res) => {
             const status = isOnline ? '<span style="color:green; font-weight:bold;">在线</span>' : '<span style="color:red; font-weight:bold;">离线</span>';
             const cmd = `curl -sL ${host}/install.sh | bash -s ${s.id} ${API_SECRET}`;
             
+            // 按钮注入：带上真实的 ssh 数据，但对于 HTML 转义处理单引号，这里简单处理
             trs += `
                 <tr>
                     <td>${s.name}</td>
@@ -401,9 +409,9 @@ app.get('/admin', requireWebAuth, (req, res) => {
                     <td>
                         <input type="text" readonly value="${cmd}" style="width:280px; padding:6px; margin-right:5px; border:1px solid #ccc; border-radius:4px;" id="cmd-${s.id}">
                         <button onclick="copyCmd('${s.id}')" class="btn btn-gray">复制命令</button>
-                        <button onclick="openEditModal('${s.id}', '${s.server_group||''}', '${s.price||''}', '${s.expire_date||''}', '${s.bandwidth||''}', '${s.traffic_limit||''}')" class="btn btn-blue">✏️ 编辑</button>
+                        <button onclick="openEditModal('${s.id}', '${s.server_group||''}', '${s.price||''}', '${s.expire_date||''}', '${s.bandwidth||''}', '${s.traffic_limit||''}', '${s.ssh_host||''}', '${s.ssh_port||'22'}', '${s.ssh_user||'root'}', '${s.ssh_pass||''}')" class="btn btn-blue">✏️ 编辑</button>
                         <button onclick="openIpHistoryModal('${s.id}', '${s.name}')" class="btn btn-purple">🌐 IP质量</button>
-                        <button onclick="openSshModal('${s.name}')" class="btn btn-green">💻 SSH</button>
+                        <button onclick="openSshModal('${s.name}', '${s.ssh_host||''}', '${s.ssh_port||'22'}', '${s.ssh_user||'root'}', '${s.ssh_pass||''}')" class="btn btn-green">💻 SSH</button>
                         <button onclick="deleteServer('${s.id}')" class="btn btn-red">🗑️ 删除</button>
                     </td>
                 </tr>
@@ -433,7 +441,7 @@ app.get('/admin', requireWebAuth, (req, res) => {
         .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
         .form-group { display: flex; flex-direction: column; margin-bottom: 15px; }
         .form-group label { font-size: 14px; font-weight: 600; margin-bottom: 6px; color: #555;}
-        .form-group input[type="text"], .form-group input[type="number"], .form-group input[type="date"], .form-group select { padding: 10px; border: 1px solid #ccc; border-radius: 6px; }
+        .form-group input[type="text"], .form-group input[type="number"], .form-group input[type="date"], .form-group select, .form-group input[type="password"] { padding: 10px; border: 1px solid #ccc; border-radius: 6px; }
         .checkbox-group { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 14px;}
         .checkbox-group input { width: 18px; height: 18px; cursor: pointer; }
         .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 100; }
@@ -517,14 +525,30 @@ app.get('/admin', requireWebAuth, (req, res) => {
       </div>
 
       <div id="editModal" class="modal">
-        <div class="modal-content">
+        <div class="modal-content" style="width: 450px;">
           <h3 style="margin-top:0;">✏️ 编辑服务器信息</h3>
           <input type="hidden" id="editId">
-          <label>分组名称</label> <input type="text" id="editGroup" placeholder="如：美国 VPS">
-          <label>价格</label> <input type="text" id="editPrice" placeholder="如：40USD/Year 或 免费">
+          <div style="display:flex; gap:10px;">
+            <div style="flex:1"><label>分组名称</label> <input type="text" id="editGroup" placeholder="如：美国 VPS"></div>
+            <div style="flex:1"><label>价格</label> <input type="text" id="editPrice" placeholder="如：40USD/Year"></div>
+          </div>
           <label>到期时间</label> <input type="date" id="editExpire">
-          <label>带宽 (前端徽章)</label> <input type="text" id="editBandwidth" placeholder="如：1Gbps 或 200Mbps">
-          <label>流量总量 (前端徽章)</label> <input type="text" id="editTraffic" placeholder="如：1TB/月">
+          <div style="display:flex; gap:10px;">
+            <div style="flex:1"><label>带宽</label> <input type="text" id="editBandwidth" placeholder="如：1Gbps"></div>
+            <div style="flex:1"><label>流量总量</label> <input type="text" id="editTraffic" placeholder="如：1TB/月"></div>
+          </div>
+
+          <hr style="margin: 15px 0; border: none; border-top: 1px dashed #ccc;">
+          <label style="color:#8b5cf6;">💻 SSH 直连配置 (选填，保存后可自动秒连)</label>
+          <div style="display:flex; gap:10px;">
+            <div style="flex:1"><label>连接 IP</label><input type="text" id="editSshHost" placeholder="真实IP或域名"></div>
+            <div style="width:70px"><label>端口</label><input type="text" id="editSshPort" placeholder="22"></div>
+          </div>
+          <div style="display:flex; gap:10px;">
+            <div style="flex:1"><label>用户名</label><input type="text" id="editSshUser" placeholder="root"></div>
+            <div style="flex:1"><label>密码</label><input type="password" id="editSshPass" placeholder="留空不修改"></div>
+          </div>
+
           <div style="text-align: right; margin-top: 10px;">
             <button onclick="closeModal('editModal')" style="padding: 8px 15px; border: 1px solid #ccc; background: white; margin-right: 5px; cursor:pointer;">取消</button>
             <button onclick="saveEdit()" class="btn btn-blue" style="padding: 8px 15px;">保存更改</button>
@@ -585,7 +609,7 @@ app.get('/admin', requireWebAuth, (req, res) => {
             <div style="width:80px;"><label>端口</label><input type="text" id="sshPort" value="22"></div>
             <div style="width:120px;"><label>用户名</label><input type="text" id="sshUser" value="root"></div>
             <div style="flex:1;"><label>密码</label><input type="password" id="sshPass" placeholder="SSH Password"></div>
-            <button onclick="connectSsh()" class="btn btn-green" style="padding: 10px 20px; margin-bottom:12px;">⚡ 连接</button>
+            <button onclick="connectSsh()" class="btn btn-green" style="padding: 10px 20px; margin-bottom:12px;" id="sshConnectBtn">⚡ 连接</button>
           </div>
           <div class="preset-btns">
             <button class="preset-btn" onclick="sendCmd('clear\\n')">🧹 清屏</button>
@@ -656,13 +680,19 @@ app.get('/admin', requireWebAuth, (req, res) => {
           alert('✅ 一键命令已复制！');
         }
 
-        function openEditModal(id, group, price, expire, bw, traffic) {
+        function openEditModal(id, group, price, expire, bw, traffic, shost, sport, suser, spass) {
           document.getElementById('editId').value = id;
           document.getElementById('editGroup').value = group || '默认分组';
           document.getElementById('editPrice').value = price || '免费';
           document.getElementById('editExpire').value = expire || '';
           document.getElementById('editBandwidth').value = bw || '';
           document.getElementById('editTraffic').value = traffic || '';
+          
+          document.getElementById('editSshHost').value = shost || '';
+          document.getElementById('editSshPort').value = sport || '22';
+          document.getElementById('editSshUser').value = suser || 'root';
+          document.getElementById('editSshPass').value = spass || '';
+          
           document.getElementById('editModal').style.display = 'block';
         }
 
@@ -673,7 +703,11 @@ app.get('/admin', requireWebAuth, (req, res) => {
             action: 'edit', id: document.getElementById('editId').value,
             server_group: document.getElementById('editGroup').value, price: document.getElementById('editPrice').value,
             expire_date: document.getElementById('editExpire').value, bandwidth: document.getElementById('editBandwidth').value,
-            traffic_limit: document.getElementById('editTraffic').value
+            traffic_limit: document.getElementById('editTraffic').value,
+            ssh_host: document.getElementById('editSshHost').value,
+            ssh_port: document.getElementById('editSshPort').value,
+            ssh_user: document.getElementById('editSshUser').value,
+            ssh_pass: document.getElementById('editSshPass').value
           };
           const res = await fetch('/admin/api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
           if (res.ok) location.reload(); else alert('保存失败');
@@ -736,17 +770,33 @@ app.get('/admin', requireWebAuth, (req, res) => {
         }
 
         let term, fitAddon, ws;
-        function openSshModal(name) {
+        function openSshModal(name, host, port, user, pass) {
             document.getElementById('sshTargetName').innerText = name;
             document.getElementById('sshModal').style.display = 'block';
+            
+            // 自动填充保存的凭据
+            document.getElementById('sshHost').value = host || '';
+            document.getElementById('sshPort').value = port || '22';
+            document.getElementById('sshUser').value = user || 'root';
+            document.getElementById('sshPass').value = pass || '';
+            
             if (!term) {
                 term = new Terminal({ cursorBlink: true, theme: { background: '#000' } });
                 fitAddon = new FitAddon.FitAddon();
                 term.loadAddon(fitAddon);
                 term.open(document.getElementById('terminal-container'));
                 setTimeout(() => fitAddon.fit(), 100);
-                term.writeln('Welcome to Web SSH Terminal.');
-                term.writeln('Please enter credentials and click Connect.');
+            }
+            
+            term.reset();
+            term.writeln('Welcome to Web SSH Terminal.');
+            
+            // 如果存在主机和密码，半秒后自动发起连接！实现全自动脱裤！
+            if(host && pass) {
+                term.writeln('\\x1b[36m✨ 检测到已保存的凭据，正在自动连接...\\x1b[0m');
+                setTimeout(connectSsh, 500);
+            } else {
+                term.writeln('Please click "✏️ 编辑" to save credentials for auto-connect.');
             }
         }
         function closeSshModal() {
@@ -786,7 +836,7 @@ app.get('/admin', requireWebAuth, (req, res) => {
     res.send(html);
 });
 
-// 一键安装脚本 (包含转义修复的 Bash 变量)
+// 一键安装脚本
 app.get('/install.sh', (req, res) => {
     const host = `${req.protocol}://${req.get('host')}`;
     const bashScript = `#!/bin/bash
@@ -1040,6 +1090,14 @@ app.get('/api/server', (req, res) => {
     if (!id) return res.status(400).send('Miss ID');
     const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
     if (!server) return res.status(404).send('Not Found');
+    
+    // 【核心安全修复】如果访客未登录，坚决抹除密码相关字段！
+    if (!checkWebAuth(req)) {
+        delete server.ssh_pass;
+        delete server.ssh_user;
+        delete server.ssh_host;
+    }
+    
     res.json(server);
 });
 
@@ -1300,7 +1358,7 @@ app.get('/', (req, res) => {
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <title>${sys.site_title}</title>
       <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f4f5f7; color: #333; margin: 0; padding: 20px; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #f4f5f7; color: #333; margin: 0; padding: 20px; }
         .container { max-width: 1200px; margin: 0 auto; }
         .global-stats { display: flex; flex-wrap: wrap; gap: 20px; justify-content: space-around; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.03); margin-bottom: 30px; text-align: center; }
         .g-item { flex: 1; min-width: 200px; }
