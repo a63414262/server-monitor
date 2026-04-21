@@ -7,7 +7,6 @@ import fs from 'fs';
 import path from 'path';
 
 const app = express();
-// 绑定 WebSocket 支持
 expressWs(app);
 app.use(express.json({ limit: '10mb' }));
 
@@ -26,8 +25,10 @@ if (!fs.existsSync(dbDir)) {
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 
+// 初始化所有数据表
 db.exec(`
   CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+  
   CREATE TABLE IF NOT EXISTS servers (
     id TEXT PRIMARY KEY, name TEXT, cpu TEXT, ram TEXT, disk TEXT, load_avg TEXT,
     uptime TEXT, last_updated INTEGER, ram_total TEXT, net_rx TEXT, net_tx TEXT,
@@ -35,6 +36,13 @@ db.exec(`
     server_group TEXT, price TEXT, expire_date TEXT, bandwidth TEXT, traffic_limit TEXT,
     ip_v4 TEXT, ip_v6 TEXT, arch TEXT, boot_time TEXT, ram_used TEXT, swap_total TEXT,
     swap_used TEXT, disk_total TEXT, disk_used TEXT, processes TEXT, tcp_conn TEXT, udp_conn TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS ip_reports (
+    id TEXT PRIMARY KEY,
+    server_id TEXT,
+    created_at INTEGER,
+    report_text TEXT
   );
 `);
 
@@ -73,7 +81,6 @@ const getSysSettings = () => {
 };
 
 const checkAuth = (req) => {
-    // 兼容 HTTP 拦截和 WebSocket URL 传参鉴权
     let token = '';
     if (req.headers.authorization) {
         const parts = req.headers.authorization.split(' ');
@@ -96,7 +103,7 @@ const requireAuth = (req, res, next) => {
 };
 
 // ==========================================
-// WebSocket Web SSH 终端逻辑 (核心新增)
+// WebSocket Web SSH 终端逻辑
 // ==========================================
 app.ws('/ssh', (ws, req) => {
     if (!checkAuth(req)) {
@@ -219,7 +226,7 @@ const getThemeStyles = (sys) => `
     .theme2 .card-title { color: #fff; }
 
     body.theme3 { background-color: #fef08a; color: #000; font-weight: 500; }
-    .theme3 .vps-card, .theme3 .global-stats, .theme3 .header-card, .theme3 .chart-card { background: #fff; border: 3px solid #000; border-radius: 0; box-shadow: 6px 6px 0px #000; transition: transform 0.1s, box-shadow 0.1s; }
+    .theme3 .vps-card, .global-stats, .header-card, .chart-card { background: #fff; border: 3px solid #000; border-radius: 0; box-shadow: 6px 6px 0px #000; transition: transform 0.1s, box-shadow 0.1s; }
     .theme3 .vps-card:hover { transform: translate(2px, 2px); box-shadow: 4px 4px 0px #000; border-color: #000; }
     .theme3 .group-header { color: #000; border-left: none; border-bottom: 4px solid #000; padding-left: 0; display: inline-block; font-size: 22px; font-weight: 900; text-transform: uppercase; }
     .theme3 .stat-bar { background: #e5e5e5; border: 1px solid #000; }
@@ -314,7 +321,7 @@ app.post('/admin/api', requireAuth, (req, res) => {
     }
 });
 
-// 后台渲染 UI (新增 SSH 与计算器模块)
+// 后台渲染 UI
 app.get('/admin', requireAuth, (req, res) => {
     const sys = getSysSettings();
     const results = db.prepare('SELECT id, name, last_updated, server_group, price, expire_date, bandwidth, traffic_limit FROM servers').all();
@@ -337,6 +344,7 @@ app.get('/admin', requireAuth, (req, res) => {
                         <input type="text" readonly value="${cmd}" style="width:280px; padding:6px; margin-right:5px; border:1px solid #ccc; border-radius:4px;" id="cmd-${s.id}">
                         <button onclick="copyCmd('${s.id}')" class="btn btn-gray">复制命令</button>
                         <button onclick="openEditModal('${s.id}', '${s.server_group||''}', '${s.price||''}', '${s.expire_date||''}', '${s.bandwidth||''}', '${s.traffic_limit||''}')" class="btn btn-blue">✏️ 编辑</button>
+                        <button onclick="openIpHistoryModal('${s.id}', '${s.name}')" class="btn btn-purple">🌐 IP质量</button>
                         <button onclick="openSshModal('${s.name}')" class="btn btn-green">💻 SSH</button>
                         <button onclick="deleteServer('${s.id}')" class="btn btn-red">🗑️ 删除</button>
                     </td>
@@ -376,8 +384,7 @@ app.get('/admin', requireAuth, (req, res) => {
         .modal input { width: 100%; padding: 8px; margin-bottom: 12px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;}
         .modal label { font-size: 14px; color: #555; display: block; margin-bottom: 4px; font-weight: bold;}
         
-        /* 终端容器 */
-        #terminal-container { height: 450px; background: #000; padding: 10px; border-radius: 6px; margin-top: 15px; }
+        #terminal-container, #ip-terminal-container { height: 450px; background: #000; padding: 10px; border-radius: 6px; margin-top: 15px; }
         .preset-btns { display: flex; gap: 8px; margin-bottom: 15px; flex-wrap: wrap; }
         .preset-btn { background: #e5e7eb; border: 1px solid #d1d5db; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; font-family: monospace; color: #374151; }
         .preset-btn:hover { background: #d1d5db; }
@@ -402,9 +409,9 @@ app.get('/admin', requireAuth, (req, res) => {
               </select>
             </div>
             <div class="form-group">
-              <label>🖼️ 自定义背景图片 (上传或填URL，开启后强制全透明)</label>
+              <label>🖼️ 自定义背景图片</label>
               <div style="display:flex; gap:8px;">
-                 <input type="text" id="cfg_custom_bg" value="${sys.custom_bg || ''}" placeholder="粘贴图片 URL 或 点击右侧按钮上传" style="flex:1;">
+                 <input type="text" id="cfg_custom_bg" value="${sys.custom_bg || ''}" placeholder="粘贴图片 URL 或 本地上传" style="flex:1;">
                  <input type="file" id="bg_file" accept="image/*" style="display:none;" onchange="uploadBg(this)">
                  <button class="btn btn-gray" onclick="document.getElementById('bg_file').click()">📁 本地上传</button>
               </div>
@@ -469,10 +476,7 @@ app.get('/admin', requireAuth, (req, res) => {
       <div id="calcModal" class="modal">
         <div class="modal-content">
           <h3 style="margin-top:0;">🧮 VPS 剩余价值计算器</h3>
-          <div class="form-group">
-            <label>原价/购买金额 (比如 USD或CNY)</label>
-            <input type="number" id="calcPrice" placeholder="例如: 39.9">
-          </div>
+          <div class="form-group"><label>原价/购买金额</label><input type="number" id="calcPrice" placeholder="例如: 39.9"></div>
           <div class="form-group">
             <label>购买周期</label>
             <select id="calcCycle">
@@ -482,26 +486,32 @@ app.get('/admin', requireAuth, (req, res) => {
               <option value="30">月付 (30天)</option>
             </select>
           </div>
-          <div class="form-group">
-            <label>到期时间</label>
-            <input type="date" id="calcExpire">
-          </div>
-          <div class="form-group">
-            <label>溢价 / 砍价 (正数为溢价，负数为砍价)</label>
-            <input type="number" id="calcPremium" value="0" placeholder="例如: 10 或 -5">
-          </div>
-          
+          <div class="form-group"><label>到期时间</label><input type="date" id="calcExpire"></div>
+          <div class="form-group"><label>溢价 / 砍价 (正数溢价，负数砍价)</label><input type="number" id="calcPremium" value="0"></div>
           <button onclick="calculateValue()" class="btn btn-purple" style="width: 100%; padding: 10px; font-size: 15px;">🚀 开始计算</button>
-          
           <div id="calcResult" class="calc-result" style="display:none;">
             <div>剩余天数: <span id="resDays">0</span> 天</div>
             <div>日均成本: <span id="resDaily">0</span></div>
             <div style="margin-top:10px;">明盘建议价: <br><strong id="resFinal">0.00</strong></div>
           </div>
-
           <div style="text-align: right; margin-top: 15px;">
             <button onclick="closeModal('calcModal')" style="padding: 8px 15px; border: 1px solid #ccc; background: white; cursor:pointer;">关闭</button>
           </div>
+        </div>
+      </div>
+
+      <div id="ipHistoryModal" class="modal">
+        <div class="modal-content modal-large">
+          <h3 style="margin-top:0; display:flex; justify-content:space-between; align-items:center;">
+            <span>🌐 IP 质量历史记录 - <span id="ipHistoryTargetName"></span></span>
+            <button onclick="closeModal('ipHistoryModal')" style="border:none; background:none; font-size:20px; cursor:pointer;">✖</button>
+          </h3>
+          <div style="margin-bottom: 15px; display: flex; align-items: center; gap: 10px;">
+            <label>⏱️ 选择时间：</label>
+            <select id="ipHistorySelect" onchange="renderIpReport(this.value)" style="padding: 6px; border-radius: 4px; border: 1px solid #ccc; flex: 1;"></select>
+            <button class="btn btn-green" onclick="refreshIpHistory()">🔄 刷新</button>
+          </div>
+          <div id="ip-terminal-container"></div>
         </div>
       </div>
 
@@ -511,7 +521,6 @@ app.get('/admin', requireAuth, (req, res) => {
             <span>💻 Web SSH 直连 - <span id="sshTargetName"></span></span>
             <button onclick="closeSshModal()" style="border:none; background:none; font-size:20px; cursor:pointer;">✖</button>
           </h3>
-          
           <div style="display:flex; gap:10px; margin-bottom: 15px; align-items:flex-end;">
             <div style="flex:1;"><label>IP地址</label><input type="text" id="sshHost" placeholder="192.168.1.1"></div>
             <div style="width:80px;"><label>端口</label><input type="text" id="sshPort" value="22"></div>
@@ -519,16 +528,17 @@ app.get('/admin', requireAuth, (req, res) => {
             <div style="flex:1;"><label>密码</label><input type="password" id="sshPass" placeholder="SSH Password"></div>
             <button onclick="connectSsh()" class="btn btn-green" style="padding: 10px 20px; margin-bottom:12px;">⚡ 连接</button>
           </div>
-
           <div class="preset-btns">
             <button class="preset-btn" onclick="sendCmd('clear\\n')">🧹 清屏</button>
             <button class="preset-btn" onclick="sendCmd('apt update && apt upgrade -y\\n')">🔄 更新系统</button>
-            <button class="preset-btn" onclick="sendCmd('wget -qO- bench.sh | bash\\n')">🚀 测速脚本 (bench.sh)</button>
             <button class="preset-btn" onclick="sendCmd('curl -sL yabs.sh | bash\\n')">🛠️ 综合测试 (yabs.sh)</button>
+            <button class="preset-btn" onclick="sendCmd('/usr/local/bin/cf-ip-check.sh\\n')">🌐 手动跑IP监控</button>
+            
+            <button class="preset-btn" style="background:#fef08a; border-color:#eab308; font-weight:bold; color:#854d0e;" onclick="sendCmd('/usr/local/bin/cf-ip-warm.sh\\n')">🛡️ 原生防送中/IP洗白</button>
+
             <button class="preset-btn" onclick="sendCmd('top\\n')">📊 查看 Top</button>
             <button class="preset-btn" onclick="sendCmd('df -h\\n')">💾 磁盘信息</button>
           </div>
-
           <div id="terminal-container"></div>
         </div>
       </div>
@@ -536,9 +546,8 @@ app.get('/admin', requireAuth, (req, res) => {
       ${footerHtml}
 
       <script>
-        const API_SECRET = '${API_SECRET}'; // 前端获取 Token 供 WS 鉴权
+        const API_SECRET = '${API_SECRET}'; 
 
-        // 文件上传转 Base64
         function uploadBg(input) {
           const file = input.files[0];
           if(!file) return;
@@ -589,7 +598,7 @@ app.get('/admin', requireAuth, (req, res) => {
         function copyCmd(id) {
           const input = document.getElementById('cmd-' + id);
           input.select(); document.execCommand('copy');
-          alert('✅ 一键命令已复制！');
+          alert('✅ 一键命令已复制！覆盖安装即可生效最新脚本环境。');
         }
 
         function openEditModal(id, group, price, expire, bw, traffic) {
@@ -618,9 +627,7 @@ app.get('/admin', requireAuth, (req, res) => {
         // ==============================
         // 剩余价值计算器逻辑
         // ==============================
-        function openCalcModal() {
-            document.getElementById('calcModal').style.display = 'block';
-        }
+        function openCalcModal() { document.getElementById('calcModal').style.display = 'block'; }
 
         function calculateValue() {
             const price = parseFloat(document.getElementById('calcPrice').value);
@@ -628,23 +635,13 @@ app.get('/admin', requireAuth, (req, res) => {
             const expireDate = new Date(document.getElementById('calcExpire').value);
             const premium = parseFloat(document.getElementById('calcPremium').value) || 0;
             
-            if (isNaN(price) || isNaN(expireDate.getTime())) {
-                alert('请填写正确的金额和到期日期！');
-                return;
-            }
+            if (isNaN(price) || isNaN(expireDate.getTime())) return alert('请填写正确的金额和到期日期！');
 
-            const now = new Date();
-            const timeDiff = expireDate.getTime() - now.getTime();
-            const remainDays = Math.ceil(timeDiff / (1000 * 3600 * 24));
-
-            if (remainDays <= 0) {
-                alert('该机器已到期或即将到期，剩余价值为 0');
-                return;
-            }
+            const remainDays = Math.ceil((expireDate.getTime() - new Date().getTime()) / (1000 * 3600 * 24));
+            if (remainDays <= 0) return alert('该机器已到期，剩余价值为 0');
 
             const dailyPrice = price / cycle;
-            const residualValue = dailyPrice * remainDays;
-            const finalPrice = residualValue + premium;
+            const finalPrice = (dailyPrice * remainDays) + premium;
 
             document.getElementById('resDays').innerText = remainDays;
             document.getElementById('resDaily').innerText = dailyPrice.toFixed(4);
@@ -653,7 +650,61 @@ app.get('/admin', requireAuth, (req, res) => {
         }
 
         // ==============================
-        // Web SSH 终端逻辑 (xterm.js)
+        // IP 质量历史监控逻辑
+        // ==============================
+        let ipHistoryTerm, ipHistoryFit;
+        let currentIpHistory = [];
+        let currentIpServerId = '';
+
+        async function openIpHistoryModal(id, name) {
+            currentIpServerId = id;
+            document.getElementById('ipHistoryTargetName').innerText = name;
+            document.getElementById('ipHistoryModal').style.display = 'block';
+            
+            if (!ipHistoryTerm) {
+                ipHistoryTerm = new Terminal({ convertEol: true, theme: { background: '#000' } });
+                ipHistoryFit = new FitAddon.FitAddon();
+                ipHistoryTerm.loadAddon(ipHistoryFit);
+                ipHistoryTerm.open(document.getElementById('ip-terminal-container'));
+            }
+            setTimeout(() => ipHistoryFit.fit(), 100);
+            await refreshIpHistory();
+        }
+
+        async function refreshIpHistory() {
+            ipHistoryTerm.clear();
+            ipHistoryTerm.writeln('\\x1b[33m正在拉取 IP 质量体检记录...\\x1b[0m');
+            
+            const res = await fetch('/api/ip-history?id=' + currentIpServerId);
+            currentIpHistory = await res.json();
+            
+            const select = document.getElementById('ipHistorySelect');
+            select.innerHTML = '';
+            
+            if (currentIpHistory.length === 0) {
+                ipHistoryTerm.clear();
+                ipHistoryTerm.writeln('\\x1b[31m暂无 IP 质量体检记录。\\x1b[0m');
+                ipHistoryTerm.writeln('\\r\\n说明：重新复制安装命令到被控机执行即可配置定时检测。');
+                return;
+            }
+            
+            currentIpHistory.forEach((item, index) => {
+                const opt = document.createElement('option');
+                opt.value = index;
+                opt.text = new Date(item.created_at).toLocaleString();
+                select.appendChild(opt);
+            });
+            renderIpReport(0);
+        }
+
+        function renderIpReport(index) {
+            if(!currentIpHistory[index]) return;
+            ipHistoryTerm.clear();
+            ipHistoryTerm.write(currentIpHistory[index].report_text);
+        }
+
+        // ==============================
+        // Web SSH 终端逻辑
         // ==============================
         let term, fitAddon, ws;
 
@@ -666,7 +717,7 @@ app.get('/admin', requireAuth, (req, res) => {
                 fitAddon = new FitAddon.FitAddon();
                 term.loadAddon(fitAddon);
                 term.open(document.getElementById('terminal-container'));
-                fitAddon.fit();
+                setTimeout(() => fitAddon.fit(), 100);
                 term.writeln('Welcome to Web SSH Terminal.');
                 term.writeln('Please enter credentials and click Connect.');
             }
@@ -674,9 +725,7 @@ app.get('/admin', requireAuth, (req, res) => {
 
         function closeSshModal() {
             document.getElementById('sshModal').style.display = 'none';
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.close();
-            }
+            if (ws && ws.readyState === WebSocket.OPEN) ws.close();
         }
 
         function connectSsh() {
@@ -696,25 +745,15 @@ app.get('/admin', requireAuth, (req, res) => {
 
             ws.onopen = () => {
                 ws.send(JSON.stringify({ type: 'connect', host, port, username, password }));
-                
-                term.onData(data => {
-                    if (ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify({ type: 'data', data }));
-                    }
-                });
+                term.onData(data => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'data', data })); });
             };
 
             ws.onmessage = (event) => {
                 const msg = JSON.parse(event.data);
-                if (msg.type === 'data') {
-                    term.write(msg.data);
-                } else if (msg.type === 'status') {
-                    term.write(msg.msg);
-                } else if (msg.type === 'error') {
-                    term.write('\\x1b[31m' + msg.msg + '\\x1b[0m');
-                }
+                if (msg.type === 'data') term.write(msg.data);
+                else if (msg.type === 'status') term.write(msg.msg);
+                else if (msg.type === 'error') term.write('\\x1b[31m' + msg.msg + '\\x1b[0m');
             };
-            
             ws.onclose = () => { term.writeln('\\r\\n\\x1b[31mConnection closed.\\x1b[0m'); };
         }
 
@@ -733,7 +772,7 @@ app.get('/admin', requireAuth, (req, res) => {
     res.send(html);
 });
 
-// 一键安装脚本
+// 一键安装脚本 (包含防送中原生洗白模块)
 app.get('/install.sh', (req, res) => {
     const host = `${req.protocol}://${req.get('host')}`;
     const bashScript = `#!/bin/bash
@@ -742,11 +781,12 @@ SECRET=$2
 WORKER_URL="${host}/update"
 
 if [ -z "$SERVER_ID" ] || [ -z "$SECRET" ]; then echo "错误: 缺少参数。"; exit 1; fi
-echo "开始安装探针 Agent..."
+echo "开始安装探针 Agent 及 增强组件..."
 
 systemctl stop cf-probe.service 2>/dev/null
 pkill -f cf-probe.sh 2>/dev/null
 
+# 1. 写入探针主脚本
 cat << 'EOF' > /usr/local/bin/cf-probe.sh
 #!/bin/bash
 SERVER_ID="$1"
@@ -829,8 +869,59 @@ while true; do
 done
 EOF
 
-chmod +x /usr/local/bin/cf-probe.sh
+# 2. 写入 IP 体检脚本
+cat << 'EOF' > /usr/local/bin/cf-ip-check.sh
+#!/bin/bash
+SERVER_ID="$1"
+SECRET="$2"
+WORKER_URL="$3"
 
+if ! command -v curl &> /dev/null; then exit 1; fi
+REPORT=$(curl -sL https://raw.githubusercontent.com/xykt/IPQuality/main/ip.sh | bash)
+REPORT_B64=$(echo "$REPORT" | base64 | tr -d '\n' | tr -d '\r')
+
+PAYLOAD="{\"id\": \"$SERVER_ID\", \"secret\": \"$SECRET\", \"report_b64\": \"$REPORT_B64\"}"
+curl -s -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$WORKER_URL" > /dev/null
+EOF
+
+# 3. 【核心新增】写入 原生原生防送中/IP洗白 脚本
+cat << 'EOF' > /usr/local/bin/cf-ip-warm.sh
+#!/bin/bash
+echo -e "\e[33m[IP 养护] 正在初始化原生防送中探测序列...\e[0m"
+
+# 随机用户代理池
+UAS=(
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+)
+
+# 随机搜索行为池
+KEYWORDS=("weather" "local+news" "amazon" "netflix" "speedtest" "restaurant+near+me" "buy+shoes+online" "maps")
+
+RAND_UA=${UAS[$RANDOM % ${#UAS[@]}]}
+RAND_KW=${KEYWORDS[$RANDOM % ${#KEYWORDS[@]}]}
+
+echo -e "\e[36m[*] 伪装指纹:\e[0m $RAND_UA"
+echo -e "\e[36m[*] 注入坐标行为:\e[0m 搜索 '$RAND_KW'"
+
+# 模拟真实搜索请求
+curl -sL -A "$RAND_UA" -H "Accept-Language: en-US,en;q=0.9" "https://www.google.com/search?q=$RAND_KW" > /dev/null
+# 随机休眠防识别
+SLEEP_TIME=$((RANDOM % 5 + 2))
+echo -e "\e[36m[*] 休眠 ${SLEEP_TIME} 秒模拟阅读...\e[0m"
+sleep $SLEEP_TIME
+
+curl -sL -A "$RAND_UA" "https://www.youtube.com/results?search_query=$RAND_KW" > /dev/null
+
+echo -e "\e[32m[IP 养护] 探测完成，已成功向全球数据库注入活跃本地信号！\e[0m"
+EOF
+
+chmod +x /usr/local/bin/cf-probe.sh
+chmod +x /usr/local/bin/cf-ip-check.sh
+chmod +x /usr/local/bin/cf-ip-warm.sh
+
+# 4. 注册探针守护进程
 cat << EOF > /etc/systemd/system/cf-probe.service
 [Unit]
 Description=Server Monitor Probe Agent
@@ -849,7 +940,13 @@ systemctl daemon-reload
 systemctl enable cf-probe.service
 systemctl restart cf-probe.service
 
-echo "✅ 探针安装成功！"
+# 5. 配置双路 Cron (凌晨测IP，白天每6小时自动洗白防送中)
+RAND_MIN=$((RANDOM % 60))
+(crontab -l 2>/dev/null | grep -v "cf-ip-check.sh" | grep -v "cf-ip-warm.sh" ; echo "$RAND_MIN 4 * * * /usr/local/bin/cf-ip-check.sh $SERVER_ID $SECRET ${host}/update-ip" ; echo "$RAND_MIN */6 * * * /usr/local/bin/cf-ip-warm.sh > /dev/null 2>&1") | crontab -
+
+nohup /usr/local/bin/cf-ip-check.sh $SERVER_ID $SECRET "${host}/update-ip" > /dev/null 2>&1 &
+
+echo "✅ 探针及增强模块全部安装成功！"
 `;
     res.setHeader('Content-Type', 'text/plain;charset=UTF-8');
     res.send(bashScript);
@@ -892,6 +989,34 @@ app.post('/update', (req, res) => {
     }
 });
 
+app.post('/update-ip', (req, res) => {
+    try {
+        const { id, secret, report_b64 } = req.body;
+        if (secret !== API_SECRET) return res.status(401).send('Unauthorized');
+
+        const serverExists = db.prepare('SELECT id FROM servers WHERE id = ?').get(id);
+        if (!serverExists) return res.status(404).send('Server not found');
+
+        const reportText = Buffer.from(report_b64, 'base64').toString('utf-8');
+        const reportId = crypto.randomUUID();
+        
+        db.prepare('INSERT INTO ip_reports (id, server_id, created_at, report_text) VALUES (?, ?, ?, ?)').run(
+            reportId, id, Date.now(), reportText
+        );
+
+        db.prepare(`
+            DELETE FROM ip_reports 
+            WHERE id NOT IN (
+                SELECT id FROM ip_reports WHERE server_id = ? ORDER BY created_at DESC LIMIT 30
+            ) AND server_id = ?
+        `).run(id, id);
+
+        res.status(200).send('OK');
+    } catch (e) {
+        res.status(400).send('Error');
+    }
+});
+
 app.get('/api/server', (req, res) => {
     const sys = getSysSettings();
     if (sys.is_public !== 'true' && !checkAuth(req)) {
@@ -903,6 +1028,13 @@ app.get('/api/server', (req, res) => {
     const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
     if (!server) return res.status(404).send('Not Found');
     res.json(server);
+});
+
+app.get('/api/ip-history', requireAuth, (req, res) => {
+    const id = req.query.id;
+    if (!id) return res.status(400).send('Miss ID');
+    const history = db.prepare('SELECT created_at, report_text FROM ip_reports WHERE server_id = ? ORDER BY created_at DESC').all();
+    res.json(history);
 });
 
 app.get('/', (req, res) => {
