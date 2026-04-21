@@ -186,7 +186,7 @@ app.get('/logout', (req, res) => {
 });
 
 // ==========================================
-// Web SSH 终端逻辑 (主控端自动发卡与零信兼容)
+// Web SSH 终端逻辑 (基于 Zero Trust + 自动密钥免密)
 // ==========================================
 app.ws('/ssh', (ws, req) => {
     if (!checkWebAuth(req)) {
@@ -209,11 +209,11 @@ app.ws('/ssh', (ws, req) => {
                 const authUser = data.username || server.ssh_user || 'root';
 
                 if (!targetHost) {
-                    ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 缺少 IP 地址，请等待探针上报或手动编辑填入！\r\n' }));
+                    ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 缺少 IP 地址，请等待探针上报！\r\n' }));
                     return;
                 }
 
-                // 核心：使用面板自动生成的本地私钥
+                // 核心：强制使用面板自带的私钥进行鉴权！
                 const sshConfig = { username: authUser, privateKey: MASTER_PRIVATE_KEY, tryKeyboard: true };
                 const isIPv6 = targetHost.includes(':');
 
@@ -231,19 +231,19 @@ app.ws('/ssh', (ws, req) => {
                 }).on('error', (err) => {
                     ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 连接失败: ' + err.message + '\r\n' }));
                 }).on('keyboard-interactive', (name, instr, lang, prompts, finish) => {
-                    // 如果私钥失败，尝试回退使用用户在界面的手动输入密码
+                    // 预留后路：若私钥失败，尝试回退使用界面填的临时密码
                     finish([data.password || '']);
                 });
 
+                // IPv6 分流逻辑：若是 fd00 (Zero Trust IP)，因系统可能自动路由，可尝试直连；
+                // 否则触发 WARP SOCKS5 (40000端口) 隧道穿透。
                 if (isIPv6 && !targetHost.startsWith('fd00:')) {
-                    // 只有公网 IPv6 才尝试走 WARP SOCKS 代理 (40000 端口)
-                    // 如果是 fd00 开头，说明是 Zero Trust 内网 IP，主控 OS 已自动路由，走原生直连
-                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n🌐 公网 IPv6 目标，尝试本地 SOCKS5 穿透...\r\n' }));
+                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n🌐 探测到公网 IPv6 目标，启动 WARP SOCKS5 隧道穿透...\r\n' }));
                     SocksClient.createConnection({
                         proxy: { ipaddress: '127.0.0.1', port: 40000, type: 5 },
                         command: 'connect', destination: { host: targetHost, port: targetPort }
                     }, (err, info) => {
-                        if (err) return ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 代理失败: ' + err.message + '\r\n' }));
+                        if (err) return ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ WARP 代理失败: ' + err.message + '\r\n' }));
                         conn.connect({ sock: info.socket, ...sshConfig });
                     });
                 } else {
@@ -348,6 +348,7 @@ app.get('/api/server', (req, res) => {
     if (!id) return res.status(400).send('Miss ID');
     const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
     if (!server) return res.status(404).send('Not Found');
+    // 安全起见，无论如何都不返还密码给前端
     if (!checkWebAuth(req)) { delete server.ssh_pass; delete server.ssh_user; delete server.ssh_host; }
     res.json(server);
 });
@@ -419,29 +420,6 @@ const getThemeStyles = (sys) => `
 `;
 
 const footerHtml = `<div style="text-align: center; margin-top: 40px; padding-bottom: 20px; font-size: 13px; color: inherit; opacity: 0.8;">Powered by CF-Server-Monitor-Pro | Node.js Edition</div>`;
-
-app.post('/admin/api', requireWebAuth, (req, res) => {
-    try {
-        const data = req.body;
-        if (data.action === 'save_settings') {
-            const stmt = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
-            db.transaction(() => { for (const [k, v] of Object.entries(data.settings)) stmt.run(k, v); })();
-            res.json({ success: true });
-        } 
-        else if (data.action === 'add') {
-            db.prepare(`INSERT INTO servers (id, name, cpu, ram, disk, load_avg, uptime, last_updated, ram_total, net_rx, net_tx, net_in_speed, net_out_speed, os, cpu_info, country, server_group, price, expire_date, bandwidth, traffic_limit, ip_v4, ip_v6, ping_ct, ping_cu, ping_cm, ping_bd, ssh_host, ssh_port, ssh_user, ssh_pass) VALUES (?, ?, '0', '0', '0', '0', '0', 0, '0', '0', '0', '0', '0', '', '', '', '默认分组', '免费', '', '', '', '0', '0', '0', '0', '0', '0', '', '22', 'root', '')`).run(crypto.randomUUID(), data.name || 'New Server');
-            res.json({ success: true });
-        } 
-        else if (data.action === 'delete') {
-            db.prepare('DELETE FROM servers WHERE id = ?').run(data.id);
-            res.json({ success: true });
-        } 
-        else if (data.action === 'edit') {
-            db.prepare(`UPDATE servers SET server_group = ?, price = ?, expire_date = ?, bandwidth = ?, traffic_limit = ? WHERE id = ?`).run(data.server_group || '默认分组', data.price || '', data.expire_date || '', data.bandwidth || '', data.traffic_limit || '', data.id);
-            res.json({ success: true });
-        }
-    } catch (e) { res.status(400).json({ error: e.message }); }
-});
 
 app.get('/admin', requireWebAuth, (req, res) => {
     const sys = getSysSettings();
@@ -789,7 +767,7 @@ app.get('/admin', requireWebAuth, (req, res) => {
             term.writeln('Welcome to Web SSH Terminal.');
             
             if(host) {
-                term.writeln('\\x1b[36m✨ 探针已上报通信IP，正在使用主控端发卡凭据全自动直连...\\x1b[0m');
+                term.writeln('\\x1b[36m✨ 探针已上报通信IP，正在尝试全自动直连...\\x1b[0m');
                 setTimeout(connectSsh, 500);
             }
         }
@@ -831,7 +809,7 @@ app.get('/admin', requireWebAuth, (req, res) => {
 });
 
 // ==========================================
-// 前台与探针接口
+// 前台大盘展示与详情页
 // ==========================================
 app.get('/', (req, res) => {
     const sys = getSysSettings();
@@ -1139,6 +1117,9 @@ if [ -n "${teamName}" ] && [ -n "${clientId}" ]; then
     echo "🔐 正在注入 Zero Trust MDM 凭据并组网..."
     mkdir -p /var/lib/cloudflare-warp
     cat << 'EOFMDM' > /var/lib/cloudflare-warp/mdm.xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
 <dict>
   <key>organization</key>
   <string>${teamName}</string>
@@ -1147,17 +1128,21 @@ if [ -n "${teamName}" ] && [ -n "${clientId}" ]; then
   <key>auth_client_secret</key>
   <string>${clientSecret}</string>
 </dict>
+</plist>
 EOFMDM
 
     systemctl restart warp-svc
-    sleep 2
-    warp-cli --accept-tos registration new
-    warp-cli --accept-tos mode warp
+    sleep 5
     warp-cli --accept-tos connect
-    sleep 3
+    sleep 5
     
-    ZT_IP=\$(warp-cli --accept-tos account | grep "IPv6" | awk '{print \$2}')
-    echo "✅ 成功加入私有网络！分配内网 IP: \$ZT_IP"
+    ZT_IP=\$(ip -6 addr show CloudflareWARP 2>/dev/null | grep inet6 | grep -v fe80 | awk '{print \$2}' | cut -d/ -f1 | head -n1)
+    
+    if [ -z "\$ZT_IP" ]; then
+        echo "⚠️ 警告: 未能获取到 Zero Trust 内网 IP，请检查面板环境变量配置。"
+    else
+        echo "✅ 成功加入私有网络！分配内网 IP: \$ZT_IP"
+    fi
 fi
 
 # ==========================================
