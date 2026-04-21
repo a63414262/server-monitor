@@ -180,7 +180,7 @@ app.get('/logout', (req, res) => {
 });
 
 // ==========================================
-// Web SSH 终端逻辑 (智能分流：V4直连，V6走本地代理)
+// Web SSH 终端逻辑 (终极鉴权修复版)
 // ==========================================
 app.ws('/ssh', (ws, req) => {
     if (!checkWebAuth(req)) {
@@ -206,13 +206,24 @@ app.ws('/ssh', (ws, req) => {
                     ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 缺少 IP 地址！\r\n' })); return;
                 }
 
-                // 修复 1：加入了 password: authPass 进行兜底密码认证
-                const sshConfig = { username: authUser, privateKey: MASTER_PRIVATE_KEY, password: authPass, tryKeyboard: true };
+                // 【修复核心】：智能动态鉴权。有密码绝不用私钥，无密码才用私钥秒连。
+                const sshConfig = { 
+                    username: authUser, 
+                    tryKeyboard: true,
+                    readyTimeout: 20000 
+                };
+                
+                if (authPass) {
+                    sshConfig.password = authPass;
+                } else {
+                    sshConfig.privateKey = MASTER_PRIVATE_KEY;
+                }
+                
                 const isIPv6 = targetHost.includes(':');
 
                 conn.on('ready', () => {
                     ws.send(JSON.stringify({ type: 'status', msg: '\r\n✅ 鉴权成功，已连接到服务器...\r\n' }));
-                    conn.shell({ term: 'xterm-color' }, (err, stream) => {
+                    conn.shell({ term: 'xterm-256color' }, (err, stream) => {
                         if (err) return ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ Shell 创建失败: ' + err.message + '\r\n' }));
                         streamObj = stream;
                         stream.on('data', (d) => ws.send(JSON.stringify({ type: 'data', data: d.toString('utf-8') })));
@@ -221,7 +232,11 @@ app.ws('/ssh', (ws, req) => {
                 }).on('error', (err) => {
                     ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 连接失败: ' + err.message + '\r\n' }));
                 }).on('keyboard-interactive', (name, instr, lang, prompts, finish) => {
-                    finish([authPass]);
+                    if (prompts.length > 0 && prompts[0].prompt.toLowerCase().includes('password')) {
+                        finish([authPass]);
+                    } else {
+                        finish([]);
+                    }
                 });
 
                 // 如果目标是 IPv6，使用容器内的 WARP 代理进行穿透
@@ -736,7 +751,6 @@ app.get('/admin', requireWebAuth, (req, res) => {
             ipHistoryTerm.write(currentIpHistory[index].report_text);
         }
 
-        // 修复 3：增加 termListener 变量防止连续连接产生多次事件监听导致数据包重复和内存泄漏
         let term, fitAddon, ws, termListener;
         function openSshModal(id, name, host, port, user) {
             document.getElementById('sshServerId').value = id;
@@ -1148,7 +1162,7 @@ while true; do
   CPU_TOTAL=\$(echo \$CPU_STAT | awk '{print \$1}')
   CPU_IDLE=\$(echo \$CPU_STAT | awk '{print \$2}')
   DIFF_TOTAL=\$((CPU_TOTAL - PREV_CPU_TOTAL))
-  DIFF_IDLE=\$((CPU_IDLE - CPU_IDLE))
+  DIFF_IDLE=\$((CPU_IDLE - PREV_CPU_IDLE))
   CPU=\$(awk -v t=\$DIFF_TOTAL -v i=\$DIFF_IDLE 'BEGIN {if (t==0) print 0; else printf "%.2f", (1 - i/t)*100}')
   PREV_CPU_TOTAL=\$CPU_TOTAL; PREV_CPU_IDLE=\$CPU_IDLE
   
