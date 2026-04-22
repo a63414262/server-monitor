@@ -66,9 +66,13 @@
 
 PORT=3000
 API_SECRET=
+
 GITHUB_CLIENT_ID=
+
 GITHUB_CLIENT_SECRET=
+
 GITHUB_ALLOWED_USERS=
+
 ENABLE_WEB_SSH=
 
 
@@ -89,7 +93,7 @@ ENABLE_WEB_SSH=
 2. 输入新的节点名称，点击 **[+ 添加新服务器]**。
 3. 复制列表中生成的专属一键安装命令。
 4. 登录你的目标 VPS（被控机）终端，粘贴并执行即可。
-*(支持纯 IPv4、纯 IPv6 及双栈网络。纯 IPv6 机器请确保面板域名已套入 Cloudflare 橙朵 CDN)*
+
 
 ### 卸载探针
 如果需要彻底清理被控机上的探针、定时任务及免密公钥，请在被控机执行以下一键清理命令：
