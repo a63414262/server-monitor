@@ -6,10 +6,10 @@
     "start": "node server.js"
   },
   "dependencies": {
+    "better-sqlite3": "^10.0.0",
     "express": "^4.19.2",
     "express-ws": "^5.0.2",
-    "better-sqlite3": "^10.0.0",
-    "ssh2": "^1.15.0",
-    "socks": "^2.8.3"
+    "socks": "^2.8.3",
+    "ssh2": "^1.15.0"
   }
 }
