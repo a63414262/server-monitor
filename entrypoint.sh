@@ -1,28 +1,29 @@
 #!/bin/bash
-echo "=========================================="
-echo "🚀 初始化环境：V4 to V6 WARP 代理桥接模式"
-echo "=========================================="
+set -e
 
-# 修复 WARP 在容器内运行的环境依赖
-mkdir -p /var/lib/cloudflare-warp
-mkdir -p /run/dbus
+echo "🚀 [1/3] 正在启动底层 WARP 守护进程..."
+# 启动 warp-svc 并在后台运行
+warp-svc > /dev/null 2>&1 &
+# 给守护进程一点时间启动
+sleep 3
 
-# 后台静默启动 WARP 守护进程 (重定向错误日志防止卡死)
-/usr/bin/warp-svc > /tmp/warp.log 2>&1 &
-echo "⏳ 等待 WARP 服务启动..."
-sleep 4
+echo "🌐 [2/3] 正在注册并配置 WARP 代理模式..."
+# 注册新的 WARP 免费账户（自动接受用户协议）
+warp-cli --accept-tos registration new || true
 
-# 尝试注册并设置为本地 SOCKS5 代理模式
-# 注意这里加了 || true，意思是就算 WARP 在这种云容器里没权限报错，也绝不阻断后续面板的启动！
-echo "🔐 尝试注册 WARP 终端并开启本地代理..."
-warp-cli --accept-tos registration new || echo "⚠️ WARP 注册受阻，可能是容器权限不足"
-warp-cli --accept-tos mode proxy || true
-warp-cli --accept-tos connect || true
+# 设置为纯代理模式 (这样它不会接管全局网络，只会监听本地端口)
+warp-cli --accept-tos mode proxy
 
-sleep 2
-warp-cli --accept-tos status || true
+# 设置 Socks5 代理端口为 40000
+warp-cli --accept-tos proxy port 40000
 
-echo "=========================================="
-echo "⚡ 开始启动 Server Monitor Pro 主程序..."
-echo "=========================================="
+# 连接 WARP 网络
+warp-cli --accept-tos connect
+
+# 等待网络建立
+sleep 3
+echo "✅ WARP IPv6 穿透通道建立成功 (127.0.0.1:40000)！"
+
+echo "⚡ [3/3] 正在启动 Server Monitor Pro Max 面板..."
+# 启动 Node.js 项目，使用 exec 替换当前 shell 进程，确保信号正确传递
 exec npm start
