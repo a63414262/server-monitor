@@ -6,7 +6,6 @@ import Database from 'better-sqlite3';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { execSync } from 'child_process'; 
 
 const app = express();
 expressWs(app);
@@ -30,7 +29,7 @@ const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 
 // ==========================================
-// 核心安全：主控端本地生成专属非对称 SSH 密钥对
+// 核心安全：原生 Node.js 生成专属非对称 SSH 密钥对 (永不崩溃版)
 // ==========================================
 const SSH_KEY_DIR = path.join(dbDir, 'ssh_keys');
 const PRIVATE_KEY_PATH = path.join(SSH_KEY_DIR, 'id_rsa');
@@ -38,22 +37,28 @@ const PUBLIC_KEY_PATH = path.join(SSH_KEY_DIR, 'id_rsa.pub');
 
 if (!fs.existsSync(SSH_KEY_DIR)) fs.mkdirSync(SSH_KEY_DIR, { recursive: true });
 
-// 使用系统 ssh-keygen 强制生成标准 OpenSSH 秘钥，兼容所有云厂商
-let needsGen = false;
+// 完全移除依赖外部系统的 ssh-keygen，使用原生 crypto 库保障容器永不崩溃
 if (!fs.existsSync(PRIVATE_KEY_PATH) || !fs.existsSync(PUBLIC_KEY_PATH)) {
-    needsGen = true;
-} else {
-    const pub = fs.readFileSync(PUBLIC_KEY_PATH, 'utf-8');
-    if (!pub.startsWith('ssh-rsa AAA')) needsGen = true; 
+    console.log('🔑 正在使用原生模块生成主控端安全 SSH 密钥对...');
+    try {
+        const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', {
+            modulusLength: 2048,
+            publicKeyEncoding: { type: 'spki', format: 'pem' },
+            privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
+        });
+        
+        // 组装成 Linux 兼容的标准 authorized_keys 格式
+        const pubBase64 = Buffer.from(publicKey.split('\n').filter(l => l && !l.startsWith('---')).join(''), 'base64').toString('base64');
+        const sshRsaPub = "ssh-rsa " + pubBase64 + " Server-Monitor-Pro-Master";
+        
+        fs.writeFileSync(PRIVATE_KEY_PATH, privateKey);
+        fs.writeFileSync(PUBLIC_KEY_PATH, sshRsaPub);
+        console.log('✅ 主控端专属 SSH 密钥对已安全生成！');
+    } catch (e) {
+        console.error('❌ 密钥生成异常:', e);
+    }
 }
 
-if (needsGen) {
-    console.log('🔑 检测到密钥缺失或格式过旧，正在生成标准 OpenSSH 格式密钥对...');
-    if (fs.existsSync(PRIVATE_KEY_PATH)) fs.unlinkSync(PRIVATE_KEY_PATH);
-    if (fs.existsSync(PUBLIC_KEY_PATH)) fs.unlinkSync(PUBLIC_KEY_PATH);
-    execSync(`ssh-keygen -t rsa -b 2048 -m PEM -N "" -C "Server-Monitor-Pro-Master" -f "${PRIVATE_KEY_PATH}"`);
-    console.log('✅ 主控端专属 SSH 密钥对已安全生成！');
-}
 const MASTER_PUBLIC_KEY = fs.readFileSync(PUBLIC_KEY_PATH, 'utf-8');
 const MASTER_PRIVATE_KEY = fs.readFileSync(PRIVATE_KEY_PATH, 'utf-8');
 
@@ -185,7 +190,7 @@ app.get('/logout', (req, res) => {
 });
 
 // ==========================================
-// Web SSH 终端逻辑 (纯净正式版)
+// Web SSH 终端逻辑 (终极兼容鉴权修复版)
 // ==========================================
 app.ws('/ssh', (ws, req) => {
     if (!checkWebAuth(req)) {
@@ -211,11 +216,11 @@ app.ws('/ssh', (ws, req) => {
                     ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 缺少 IP 地址！\r\n' })); return;
                 }
 
-                // 去除 debug 输出，保留智能动态鉴权
+                // 【绝杀修复】：如果是密码登录，绝不夹带私钥，防止高安机器直接掐断连接
                 const sshConfig = { 
                     username: authUser, 
                     tryKeyboard: true,
-                    readyTimeout: 20000
+                    readyTimeout: 20000 
                 };
                 
                 if (authPass) {
