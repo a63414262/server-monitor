@@ -1,7 +1,7 @@
 FROM node:20-bookworm
 
-# 安装基础依赖并引入 Cloudflare 官方源安装 WARP，新增 openssh-client
-RUN apt-get update && apt-get install -y curl gnupg lsb-release iproute2 openssh-client \
+# 安装基础依赖并引入 Cloudflare 官方源安装 WARP
+RUN apt-get update && apt-get install -y curl gnupg lsb-release iproute2 \
     && curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list \
     && apt-get update && apt-get install -y cloudflare-warp \
