@@ -67,6 +67,7 @@
 
 ### 4. 环境变量 (Environment Variables) ⚠️ 核心
 点击 `+ Add Variable` 依次添加以下 4 个环境变量：
+* `PORT` = `3000` 
 * `API_SECRET` = `你自定义的探针通信秘钥` (例如 `MySecret123456`)
 * `GITHUB_CLIENT_ID` = `第一步获取的 Client ID`
 * `GITHUB_CLIENT_SECRET` = `第一步获取的 Client Secret`
