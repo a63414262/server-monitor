@@ -47,7 +47,7 @@
 ### 1. 基础配置
 * **Application Name (应用名称)**: 随意填写，例如 `server-monitor`。
 * **Image (镜像类型)**: 选择 **Public**。
-* **Image Name (镜像名称)**: 填入GitHub 镜像地址， `ghcr.io/a63414262/repo:latest`。
+* **Image Name (镜像名称)**: 填入GitHub 镜像地址， `ghcr.io/a63414262/repo:latest`
 
 ### 2. 网络配置 (NodePorts)
 * 在端口映射区域，**内部容器端口 (Container Port)** 必须填写：`3000`。
