@@ -1,17 +1,15 @@
 {
-  "name": "server-monitor-pro",
-  "version": "1.0.0",
-  "description": "Server Monitor with V4 to V6 WARP Bridge",
+  "name": "server-monitor-pro-max",
+  "version": "3.0.0",
   "type": "module",
-  "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "better-sqlite3": "^9.4.3",
-    "express": "^4.18.2",
+    "express": "^4.19.2",
     "express-ws": "^5.0.2",
-    "socks": "^2.8.1",
-    "ssh2": "^1.15.0"
+    "better-sqlite3": "^10.0.0",
+    "ssh2": "^1.15.0",
+    "socks": "^2.8.3"
   }
 }
