@@ -1204,7 +1204,8 @@ while true; do
   
   PAYLOAD="{\\"id\\": \\"\$SERVER_ID\\", \\"secret\\": \\"\$SECRET\\", \\"ssh_host\\": \\"\$BEST_IP\\", \\"ssh_port\\": \\"\$SSH_PORT\\", \\"metrics\\": { \\"cpu\\": \\"\$CPU\\", \\"ram\\": \\"\$RAM\\", \\"ram_total\\": \\"\$RAM_TOTAL\\", \\"ram_used\\": \\"\$RAM_USED\\", \\"swap_total\\": \\"\$SWAP_TOTAL\\", \\"swap_used\\": \\"\$SWAP_USED\\", \\"disk\\": \\"\$DISK\\", \\"disk_total\\": \\"\$DISK_TOTAL\\", \\"disk_used\\": \\"\$DISK_USED\\", \\"load\\": \\"\$LOAD\\", \\"uptime\\": \\"\$UPTIME\\", \\"boot_time\\": \\"\$BOOT_TIME\\", \\"net_rx\\": \\"\$RX_NOW\\", \\"net_tx\\": \\"\$TX_NOW\\", \\"net_in_speed\\": \\"\$RX_SPEED\\", \\"net_out_speed\\": \\"\$TX_SPEED\\", \\"os\\": \\"\$OS\\", \\"arch\\": \\"\$ARCH\\", \\"cpu_info\\": \\"\$CPU_INFO\\", \\"processes\\": \\"\$PROCESSES\\", \\"tcp_conn\\": \\"\$TCP_CONN\\", \\"udp_conn\\": \\"\$UDP_CONN\\", \\"ip_v4\\": \\"\$IPV4\\", \\"ip_v6\\": \\"\$IPV6\\", \\"ping_ct\\": \\"\$PING_CT\\", \\"ping_cu\\": \\"\$PING_CU\\", \\"ping_cm\\": \\"\$PING_CM\\", \\"ping_bd\\": \\"\$PING_BD\\" }}"
   
-  curl -s -X POST -H "Content-Type: application/json" -d "\$PAYLOAD" "$WORKER_URL" > /dev/null
+  # 【终极修复】：添加 -4 强制 IPv4 和 -m 10 防假死超时限制
+  curl -4 -m 10 -s -X POST -H "Content-Type: application/json" -d "\$PAYLOAD" "$WORKER_URL" > /dev/null
   sleep 5
 done
 EOF
@@ -1220,7 +1221,8 @@ REPORT=\$(curl -sL https://raw.githubusercontent.com/xykt/IPQuality/main/ip.sh |
 REPORT_B64=\$(echo "\$REPORT" | base64 | tr -d '\\n' | tr -d '\\r')
 
 PAYLOAD="{\\"id\\": \\"$SERVER_ID\\", \\"secret\\": \\"$SECRET\\", \\"report_b64\\": \\"\$REPORT_B64\\"}"
-curl -s -X POST -H "Content-Type: application/json" -d "\$PAYLOAD" "$WORKER_URL" > /dev/null
+# 【终极修复】：IP质量体检脚本同样加入 -4 和 防假死机制
+curl -4 -m 30 -s -X POST -H "Content-Type: application/json" -d "\$PAYLOAD" "$WORKER_URL" > /dev/null
 EOF
 
 cat << 'EOF' > /usr/local/bin/cf-ip-warm.sh
