@@ -65,6 +65,7 @@
 * `GITHUB_ALLOWED_USERS` = `你的GitHub用户名` (防止陌生人授权进入，如有多个管理员用逗号分隔)
 
 PORT=3000
+
 API_SECRET=
 
 GITHUB_CLIENT_ID=
