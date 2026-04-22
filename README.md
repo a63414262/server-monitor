@@ -73,6 +73,14 @@
 * `GITHUB_CLIENT_SECRET` = `第一步获取的 Client Secret`
 * `GITHUB_ALLOWED_USERS` = `你的GitHub用户名` (防止陌生人授权进入，如有多个管理员用逗号分隔)
 
+PORT=3000
+API_SECRET=
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+GITHUB_ALLOWED_USERS=
+ENABLE_WEB_SSH=
+
+
 ### 5. 持久化存储 (Storage / Volumes) ⚠️ 极其重要
 * 添加一个存储卷。
 * **Mount Path (容器内挂载路径)** 必须精准填写：`/app/data`
