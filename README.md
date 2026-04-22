@@ -14,86 +14,88 @@
 - 🌐 **V4/V6 智能穿透**：容器内置 Cloudflare WARP 本地代理，后台一键 SSH 秒连纯 IPv6 小鸡，无视网络隔阂。
 - 💻 **内置 Web SSH**：抛弃传统密码，主控端自动生成 OpenSSH 密钥对，探针安装时自动下发公钥，实现真正的免密安全直连。
 - 📊 **多维数据大盘**：实时监控 CPU、内存、磁盘、上下行网速、TCP/UDP 连接数，并持久化记录过去 12 小时的国内三网延迟波动（不掉线、不断点）。
-- 🔒 **纯粹安全鉴权**：支持 GitHub OAuth 授权登录与强密码 Basic Auth 双重保护机制。
+- 🔒 **纯粹安全鉴权**：强制纯 GitHub OAuth 授权登录，杜绝后台被爆破风险。
 - 🤖 **Telegram 离线告警**：节点超过 2 分钟无响应自动推送 TG 报警，恢复后自动发送恢复通知。
-- 🎨 **极简个性化**：自带 5 款高颜值前端主题（清爽白、暗黑、新粗野主义、动态渐变、赛博朋克），支持自定义背景图和毛玻璃特效。
+- 🎨 **极简个性化**：自带 5 款高颜值前端主题，支持自定义背景图和毛玻璃特效。
 - 🧮 **附加黑科技**：自带 VPS 剩余价值计算器、支持探针端 IP 智能锁定防覆盖、原生防送中发包保活。
 
 ---
 
-## 🚀 极速部署 (推荐 Docker)
+## 🔑 第一步：创建 GitHub OAuth 凭证 (用于后台登录)
 
-本项目专为容器化环境（如 Claw App Launchpad、普通 VPS）设计，数据全部采用高性能 SQLite WAL 模式，无需额外部署任何数据库。
+由于面板采用了极其安全的 GitHub 授权登录，在部署前，你需要先去 GitHub 申请一组应用凭证。
 
-### 方式一：Docker CLI 一键运行
+1. 登录 GitHub，点击右上角头像，进入 **Settings (设置)**。
+2. 滚动到左侧导航栏最底部，点击 **Developer settings (开发者设置)**。
+3. 在左侧选择 **OAuth Apps**，点击右上角 **New OAuth App**。
+4. 按以下规则填写信息：
+   - **Application name**: `Server Monitor Pro` (或者你喜欢的名字)
+   - **Homepage URL**: `https://github.com/你的用户名/你的仓库名` (或者你的面板主页域名)
+   - **Authorization callback URL** (⚠️ 最关键的一步): 
+     填写你未来面板的完整回调地址，例如：`https://你的面板域名/auth/github/callback` (如果使用 Claw，就填 Claw 分配给你的网址加上 `/auth/github/callback`)。
+5. 点击 **Register application**。
+6. 在新页面中，你会看到 **Client ID**，请先复制保存。
+7. 点击 **Generate a new client secret**，生成一串密钥。**立即复制保存它** (离开页面后将无法再次查看全文)。
 
-```bash
-docker run -d \
-  --name server-monitor \
-  --restart always \
-  -p 3000:3000 \
-  -v $(pwd)/data:/app/data \
-  -e API_SECRET="你的超强后台密码" \
-  ghcr.io/你的GitHub用户名/你的仓库名:latest
-````
+---
 
-### 方式二：Docker Compose
+## 📦 第二步：GitHub Actions 自动构建镜像
 
-创建一个 `docker-compose.yml` 文件：
+1. 将本代码仓库 Fork 或推送到你自己的 GitHub 账号下。
+2. 仓库内的 `.github/workflows/docker.yml` 会自动触发构建。
+3. 等待几分钟，点击仓库页面的 **Packages**，找到刚构建好的 Docker 镜像。
+4. 进入该镜像的 **Package Settings**，滑动到最底部，将 **Visibility 更改为 Public (公开)**，这样 Claw 才能免密拉取。
+5. 记录下你的镜像地址，格式通常为全小写：`ghcr.io/你的用户名/仓库名:latest`。
 
-```yaml
-version: '3.8'
-services:
-  monitor:
-    image: ghcr.io/你的GitHub用户名/你的仓库名:latest
-    container_name: server-monitor
-    restart: always
-    ports:
-      - "3000:3000"
-    volumes:
-      - ./data:/app/data
-    environment:
-      - API_SECRET=admin123456
-      # 可选：配置 GitHub 授权登录 (留空则默认使用 API_SECRET 登录)
-      # - GITHUB_CLIENT_ID=your_client_id
-      # - GITHUB_CLIENT_SECRET=your_client_secret
-      # - GITHUB_ALLOWED_USERS=your_github_username
-```
+---
 
-然后执行：`docker-compose up -d`
+## 🚀 第三步：Claw 容器平台一键部署
 
------
+登录你的 Claw Cloud 控制台，进入 **App Launchpad**，按照以下详细步骤填写部署表单：
 
-## ⚙️ 环境变量说明
+### 1. 基础配置
+* **Application Name (应用名称)**: 随意填写，例如 `server-monitor`。
+* **Image (镜像类型)**: 选择 **Public**。
+* **Image Name (镜像名称)**: 填入你在上一步获取的 GitHub 镜像地址，例如 `ghcr.io/username/repo:latest`。
 
-| 变量名 | 默认值 | 说明 |
-| :--- | :--- | :--- |
-| `PORT` | `3000` | 容器内部监听端口 |
-| `API_SECRET` | `admin123` | **(必填)** 探针通信秘钥与后台默认登录密码 |
-| `GITHUB_CLIENT_ID` | 无 | (可选) GitHub OAuth App Client ID |
-| `GITHUB_CLIENT_SECRET`| 无 | (可选) GitHub OAuth App Secret |
-| `GITHUB_ALLOWED_USERS`| 无 | (可选) 允许登录的 GitHub 用户名白名单，用逗号分隔 |
-| `DB_PATH` | `/app/data/monitor.db`| SQLite 数据库及 SSH 密钥存放路径 (强烈建议映射至宿主机) |
+### 2. 网络配置 (NodePorts)
+* 在端口映射区域，**内部容器端口 (Container Port)** 必须填写：`3000`。
+* 外部端口或域名绑定请根据 Claw 的指引自行配置。
 
------
+### 3. 用量限制 (Usage)
+* **Replicas (副本数)**: 保持默认 `1` 即可。CPU 和内存给默认基础配置完全够用。
 
-## 📡 探针端安装
+### 4. 环境变量 (Environment Variables) ⚠️ 核心
+点击 `+ Add Variable` 依次添加以下 4 个环境变量：
+* `API_SECRET` = `你自定义的探针通信秘钥` (例如 `MySecret123456`)
+* `GITHUB_CLIENT_ID` = `第一步获取的 Client ID`
+* `GITHUB_CLIENT_SECRET` = `第一步获取的 Client Secret`
+* `GITHUB_ALLOWED_USERS` = `你的GitHub用户名` (防止陌生人授权进入，如有多个管理员用逗号分隔)
 
-1.  登录面板后台 (`http://你的IP:3000/admin`)。
-2.  输入新的节点名称，点击 **[+ 添加新服务器]**。
-3.  复制生成的专属一键安装命令，在目标 VPS 的 SSH 终端中执行即可。
+### 5. 持久化存储 (Storage / Volumes) ⚠️ 极其重要
+* 添加一个存储卷。
+* **Mount Path (容器内挂载路径)** 必须精准填写：`/app/data`
+> 如果不配置此项，每次容器重启或更新时，你的所有节点数据、探针记录以及主控端 SSH 密钥将彻底丢失！
 
-**探针卸载命令：**
+**配置确认无误后，点击 Deploy (部署)。**
+等待容器状态变为 Running 后，访问你配置的域名，点击登录，授权 GitHub 即可进入后台！
 
+---
+
+## 📡 探针端安装与卸载
+
+### 安装探针
+1. 登录面板后台，进入 **控制台**。
+2. 输入新的节点名称，点击 **[+ 添加新服务器]**。
+3. 复制列表中生成的专属一键安装命令。
+4. 登录你的目标 VPS（被控机）终端，粘贴并执行即可。
+*(支持纯 IPv4、纯 IPv6 及双栈网络。纯 IPv6 机器请确保面板域名已套入 Cloudflare 橙朵 CDN)*
+
+### 卸载探针
+如果需要彻底清理被控机上的探针、定时任务及免密公钥，请在被控机执行以下一键清理命令：
 ```bash
 systemctl stop cf-probe.service && systemctl disable cf-probe.service && rm -f /etc/systemd/system/cf-probe.service && systemctl daemon-reload && rm -f /usr/local/bin/cf-probe.sh /usr/local/bin/cf-ip-check.sh /usr/local/bin/cf-ip-warm.sh && crontab -l 2>/dev/null | grep -v "cf-ip" | crontab - && sed -i '/Server-Monitor-Pro-Master/d' ~/.ssh/authorized_keys
-```
-
------
-
-## 📸 界面预览
-
-*(提示：你可以在这里放两张项目的截图，比如前台大盘和后台管理界面的截图，格式为 `![大盘预览](./images/preview.png)`)*
+````
 
 -----
 
