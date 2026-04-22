@@ -1,61 +1,66 @@
 
-# ⚡ Server Monitor Pro (Node.js 容器版)
+# ⚡ Server Monitor Pro Max (All-in-One WARP Edition)
 
-[![Build and Push Docker Image](https://github.com/你的用户名/server-monitor/actions/workflows/docker.yml/badge.svg)](https://github.com/你的用户名/server-monitor/actions)
-![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)
-![Docker](https://img.shields.io/badge/Docker-Latest-blue.svg)
-![License](https://img.shields.io/badge/License-MIT-yellow.svg)
+![Node.js](https://img.shields.io/badge/Node.js-20.x-green.svg)
+![Docker](https://img.shields.io/badge/Docker-Supported-blue.svg)
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
-**Server Monitor Pro** 是一款极其轻量、美观且易于部署的服务器监控系统。本项目专为 Claw Cloud (Sealos)、Docker 等容器化环境设计，采用 Node.js 后端 + SQLite3 持久化存储，支持 Telegram 离线告警、5 套美观主题自定义。
-
-> **背景：** 本版本由原 Cloudflare Worker 版本重构而来，解决了容器环境下数据持久化、Node.js 运行时适配以及登录验证等核心问题。
+一个专为极客打造的轻量级、高性能多节点服务器状态监控面板。自带 Web SSH 终端，并深度融合 **Cloudflare WARP**，彻底解决纯 IPv4 面板无法直连管理纯 IPv6 VPS 的痛点。
 
 ---
 
 ## ✨ 核心特性
 
-* 🚀 **极简部署**：完美适配 Claw Cloud / Sealos 容器平台，支持一键 Docker 部署。
-* 🎨 **炫酷主题**：内置 5 套主题样式（经典、暗黑、粗野主义、毛玻璃、赛博朋克），支持自定义背景图。
-* 📊 **实时图表**：基于 Chart.js 实时展示 CPU、内存、磁盘、流量及网络速度。
-* ✈️ **TG 离线告警**：节点掉线超过 2 分钟，自动触发 Telegram Bot 推送通知。
-* 💾 **数据持久化**：使用 SQLite 配合挂载卷，确保重启或更新镜像后配置不丢失。
-* 🔒 **安全访问**：后台及私有模式通过 HTTP Basic Auth 保护。
+- 🌐 **V4/V6 智能穿透**：容器内置 Cloudflare WARP 本地代理，后台一键 SSH 秒连纯 IPv6 小鸡，无视网络隔阂。
+- 💻 **内置 Web SSH**：抛弃传统密码，主控端自动生成 OpenSSH 密钥对，探针安装时自动下发公钥，实现真正的免密安全直连。
+- 📊 **多维数据大盘**：实时监控 CPU、内存、磁盘、上下行网速、TCP/UDP 连接数，并持久化记录过去 12 小时的国内三网延迟波动（不掉线、不断点）。
+- 🔒 **纯粹安全鉴权**：支持 GitHub OAuth 授权登录与强密码 Basic Auth 双重保护机制。
+- 🤖 **Telegram 离线告警**：节点超过 2 分钟无响应自动推送 TG 报警，恢复后自动发送恢复通知。
+- 🎨 **极简个性化**：自带 5 款高颜值前端主题（清爽白、暗黑、新粗野主义、动态渐变、赛博朋克），支持自定义背景图和毛玻璃特效。
+- 🧮 **附加黑科技**：自带 VPS 剩余价值计算器、支持探针端 IP 智能锁定防覆盖、原生防送中发包保活。
 
 ---
 
-## 🛠️ 技术栈
+## 🚀 极速部署 (推荐 Docker)
 
-* **Backend**: Node.js, Express
-* **Database**: SQLite3 (better-sqlite3)
-* **Frontend**: HTML5, Vanilla JS, Chart.js
-* **CI/CD**: GitHub Actions (Auto Docker Build)
+本项目专为容器化环境（如 Claw App Launchpad、普通 VPS）设计，数据全部采用高性能 SQLite WAL 模式，无需额外部署任何数据库。
 
----
-
-## 🚀 快速开始
-
-### 方式一：在 Claw Cloud (Sealos) 部署 (推荐)
-
-1.  **准备存储**：在 `Local Storage` 中创建一个 `1Gi` 的存储卷，挂载路径设为 `/app/data`。
-2.  **设置镜像**：
-    * Image: `ghcr.io/你的用户名/server-monitor:latest`
-    * Container Port: `3000`
-3.  **配置环境变量**：
-    * `PORT=3000`
-    * `API_SECRET=你的复杂密码`
-    * `DB_PATH=/app/data/monitor.db`
-4.  **开启外网访问**：部署成功后，通过分配的域名访问即可。
-
-### 方式二：手动 Docker 部署
+### 方式一：Docker CLI 一键运行
 
 ```bash
 docker run -d \
   --name server-monitor \
+  --restart always \
   -p 3000:3000 \
-  -v /opt/monitor/data:/app/data \
-  -e API_SECRET=admin123 \
-  ghcr.io/你的用户名/server-monitor:latest
+  -v $(pwd)/data:/app/data \
+  -e API_SECRET="你的超强后台密码" \
+  ghcr.io/你的GitHub用户名/你的仓库名:latest
 ````
+
+### 方式二：Docker Compose
+
+创建一个 `docker-compose.yml` 文件：
+
+```yaml
+version: '3.8'
+services:
+  monitor:
+    image: ghcr.io/你的GitHub用户名/你的仓库名:latest
+    container_name: server-monitor
+    restart: always
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - API_SECRET=admin123456
+      # 可选：配置 GitHub 授权登录 (留空则默认使用 API_SECRET 登录)
+      # - GITHUB_CLIENT_ID=your_client_id
+      # - GITHUB_CLIENT_SECRET=your_client_secret
+      # - GITHUB_ALLOWED_USERS=your_github_username
+```
+
+然后执行：`docker-compose up -d`
 
 -----
 
@@ -63,50 +68,45 @@ docker run -d \
 
 | 变量名 | 默认值 | 说明 |
 | :--- | :--- | :--- |
-| `PORT` | `3000` | 容器监听端口 |
-| `API_SECRET` | `admin123` | 后台管理密码 (用户名固定为 admin) |
-| `DB_PATH` | `/app/data/monitor.db` | SQLite 数据库保存路径 |
+| `PORT` | `3000` | 容器内部监听端口 |
+| `API_SECRET` | `admin123` | **(必填)** 探针通信秘钥与后台默认登录密码 |
+| `GITHUB_CLIENT_ID` | 无 | (可选) GitHub OAuth App Client ID |
+| `GITHUB_CLIENT_SECRET`| 无 | (可选) GitHub OAuth App Secret |
+| `GITHUB_ALLOWED_USERS`| 无 | (可选) 允许登录的 GitHub 用户名白名单，用逗号分隔 |
+| `DB_PATH` | `/app/data/monitor.db`| SQLite 数据库及 SSH 密钥存放路径 (强烈建议映射至宿主机) |
 
 -----
 
-## 📡 Agent 安装方法
+## 📡 探针端安装
 
-1.  登录你的探针后台：`https://你的域名/admin`。
-2.  点击 **"添加新服务器"**。
-3.  在生成的节点列表中，点击 **"复制命令"**。
-4.  在被控 VPS 上以 root 权限执行该命令即可。
+1.  登录面板后台 (`http://你的IP:3000/admin`)。
+2.  输入新的节点名称，点击 **[+ 添加新服务器]**。
+3.  复制生成的专属一键安装命令，在目标 VPS 的 SSH 终端中执行即可。
 
-**安装命令示例：**
+**探针卸载命令：**
 
 ```bash
-curl -sL [https://your-domain.com/install.sh](https://your-domain.com/install.sh) | bash -s [ID] [SECRET]
+systemctl stop cf-probe.service && systemctl disable cf-probe.service && rm -f /etc/systemd/system/cf-probe.service && systemctl daemon-reload && rm -f /usr/local/bin/cf-probe.sh /usr/local/bin/cf-ip-check.sh /usr/local/bin/cf-ip-warm.sh && crontab -l 2>/dev/null | grep -v "cf-ip" | crontab - && sed -i '/Server-Monitor-Pro-Master/d' ~/.ssh/authorized_keys
 ```
 
 -----
 
-## 📝 常见问题 (FAQ)
+## 📸 界面预览
 
-  * **为什么点击后台报错 500？**
-      * 请确保在 `server.js` 中将 `WWW-Authenticate` 的提示语修改为纯英文（如 "Admin Area"），避免中文字符导致 Header 编码错误。
-  * **如何修改默认配置？**
-      * 登录后台后点击“保存全局设置”，所有更改将实时写入数据库并持久化。
+*(提示：你可以在这里放两张项目的截图，比如前台大盘和后台管理界面的截图，格式为 `![大盘预览](./images/preview.png)`)*
 
 -----
 
-## 🤝 鸣谢
+## 🤝 鸣谢与声明
 
-  * 项目原型参考：[CF-Server-Monitor-Pro](https://github.com/a63414262/CF-Server-Monitor-Pro)
-  * UI 设计参考：小K分享
+  * 感谢 `express`、`better-sqlite3`、`ssh2`、`socks`、`chart.js` 等优秀开源组件。
+  * 感谢 Cloudflare WARP 提供的强力网络穿透能力。
 
-## 📄 开源协议
+*本项目仅供学习与服务器资产管理交流使用。*
 
-本项目遵循 [MIT License](https://www.google.com/search?q=LICENSE)。
+## 📜 许可证
+
+[MIT License](https://www.google.com/search?q=./LICENSE)
 
 ```
-
----
-
-### 使用建议：
-1.  **替换链接**：记得把上面 `你的用户名` 换成你真实的 GitHub ID。
-2.  **License 文件**：如果你想更规范，可以在仓库根目录新建一个 `LICENSE` 文件，内容使用标准的 MIT 协议。
-3.  **图片展示**：建议你手动截几张大盘的图，在 README 里加上 `![Screenshot](./screenshot.png)`，这样看起去会更专业。
+```
