@@ -30,37 +30,28 @@
 3. 在左侧选择 **OAuth Apps**，点击右上角 **New OAuth App**。
 4. 按以下规则填写信息：
    - **Application name**: `Server Monitor Pro` (或者你喜欢的名字)
-   - **Homepage URL**: `https://github.com/你的用户名/你的仓库名` (或者你的面板主页域名)
+   - **Homepage URL**: `https://Claw 分配给你的网址` (Claw 分配给你的网址)
    - **Authorization callback URL** (⚠️ 最关键的一步): 
-     填写你未来面板的完整回调地址，例如：`https://你的面板域名/auth/github/callback` (如果使用 Claw，就填 Claw 分配给你的网址加上 `/auth/github/callback`)。
+     填写你未来面板的完整回调地址，例如：`https://Claw 分配给你的网址/auth/github/callback` (填 Claw 分配给你的网址加上 `/auth/github/callback`)。
 5. 点击 **Register application**。
 6. 在新页面中，你会看到 **Client ID**，请先复制保存。
 7. 点击 **Generate a new client secret**，生成一串密钥。**立即复制保存它** (离开页面后将无法再次查看全文)。
 
 ---
 
-## 📦 第二步：GitHub Actions 自动构建镜像
 
-1. 将本代码仓库 Fork 或推送到你自己的 GitHub 账号下。
-2. 仓库内的 `.github/workflows/docker.yml` 会自动触发构建。
-3. 等待几分钟，点击仓库页面的 **Packages**，找到刚构建好的 Docker 镜像。
-4. 进入该镜像的 **Package Settings**，滑动到最底部，将 **Visibility 更改为 Public (公开)**，这样 Claw 才能免密拉取。
-5. 记录下你的镜像地址，格式通常为全小写：`ghcr.io/你的用户名/仓库名:latest`。
-
----
-
-## 🚀 第三步：Claw 容器平台一键部署
+## 🚀 第二步：Claw 容器平台一键部署
 
 登录你的 Claw Cloud 控制台，进入 **App Launchpad**，按照以下详细步骤填写部署表单：
 
 ### 1. 基础配置
 * **Application Name (应用名称)**: 随意填写，例如 `server-monitor`。
 * **Image (镜像类型)**: 选择 **Public**。
-* **Image Name (镜像名称)**: 填入你在上一步获取的 GitHub 镜像地址，例如 `ghcr.io/username/repo:latest`。
+* **Image Name (镜像名称)**: 填入GitHub 镜像地址， `ghcr.io/a63414262/repo:latest`。
 
 ### 2. 网络配置 (NodePorts)
 * 在端口映射区域，**内部容器端口 (Container Port)** 必须填写：`3000`。
-* 外部端口或域名绑定请根据 Claw 的指引自行配置。
+* public Access 必须打开获取网址。
 
 ### 3. 用量限制 (Usage)
 * **Replicas (副本数)**: 保持默认 `1` 即可。CPU 和内存给默认基础配置完全够用。
