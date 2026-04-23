@@ -9,6 +9,12 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
+
+// ==========================================
+// ⚠️ 核心修复：信任前置代理 (解决 Northflank 探针生成的 HTTP 协议报错问题)
+// ==========================================
+app.set('trust proxy', true);
+
 expressWs(app);
 app.use(express.json({ limit: '10mb' }));
 
