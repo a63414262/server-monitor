@@ -1,15 +1,18 @@
 {
-  "name": "server-monitor-pro-max",
+  "name": "server-monitor-pro",
   "version": "3.0.0",
+  "description": "Server Monitor Pro Max (Stateless Telegram Edition)",
+  "main": "server.js",
   "type": "module",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "better-sqlite3": "^10.0.0",
     "express": "^4.19.2",
     "express-ws": "^5.0.2",
     "socks": "^2.8.3",
     "ssh2": "^1.15.0"
-  }
+  },
+  "author": "",
+  "license": "MIT"
 }
