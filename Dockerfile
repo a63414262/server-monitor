@@ -4,9 +4,9 @@ FROM node:20-bookworm-slim
 # 设置工作目录
 WORKDIR /app
 
-# 安装必要的系统依赖：编译工具、SSH、Curl、GPG 等
+# ⚠️ 核心新增：安装 dbus，这是 WARP 守护进程必须的底层组件
 RUN apt-get update && apt-get install -y \
-    python3 make g++ openssh-client curl gnupg lsb-release \
+    python3 make g++ openssh-client curl gnupg lsb-release dbus \
     && rm -rf /var/lib/apt/lists/*
 
 # 添加 Cloudflare 官方 WARP 软件源并安装 warp-cli
