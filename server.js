@@ -2,11 +2,9 @@ import express from 'express';
 import expressWs from 'express-ws';
 import { Client } from 'ssh2';
 import { SocksClient } from 'socks'; 
-import Database from 'better-sqlite3';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { execSync } from 'child_process'; 
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -19,100 +17,127 @@ app.use(express.json({ limit: '10mb' }));
 // ==========================================
 const PORT = process.env.PORT || 3000;
 const API_SECRET = process.env.API_SECRET || 'admin123'; 
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'data', 'monitor.db');
 const WARP_SOCKS_HOST = '127.0.0.1';
 const WARP_SOCKS_PORT = 40000;
-
-// 【核心新增】Web SSH 功能开关
 const ENABLE_WEB_SSH = process.env.ENABLE_WEB_SSH === '1';
-
-const lastHistorySave = {};
 
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || '';
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || '';
 const GITHUB_ALLOWED_USERS = (process.env.GITHUB_ALLOWED_USERS || '').split(',').map(u => u.trim().toLowerCase()).filter(Boolean);
 
-const dbDir = path.dirname(DB_PATH);
-if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
-
-const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
+const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN || '';
+const TG_CHAT_ID = process.env.TG_CHAT_ID || '';
 
 // ==========================================
-// 核心安全：根据开关决定是否生成 SSH 密钥
+// 内存数据库与 Telegram 备份机制
 // ==========================================
-const SSH_KEY_DIR = path.join(dbDir, 'ssh_keys');
-const PRIVATE_KEY_PATH = path.join(SSH_KEY_DIR, 'id_rsa');
-const PUBLIC_KEY_PATH = path.join(SSH_KEY_DIR, 'id_rsa.pub');
+let dbData = {
+  settings: {
+    site_title: '⚡ Server Monitor Pro', admin_title: '⚙️ 资产与探针控制台',
+    theme: 'theme1', custom_bg: '', is_public: 'true', show_price: 'true',
+    show_expire: 'true', show_bw: 'true', show_tf: 'true',
+    tg_notify: 'true', tg_bot_token: TG_BOT_TOKEN, tg_chat_id: TG_CHAT_ID, alert_state: '{}'
+  },
+  servers: {},
+  sessions: {},
+  metrics_history: []
+};
 
+// 基础 Telegram 发信函数
+const sendTelegramMsg = async (msg) => {
+    if (!TG_BOT_TOKEN || !TG_CHAT_ID) return;
+    try { await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: TG_CHAT_ID, text: msg, parse_mode: 'HTML' }) }); } catch (e) {}
+};
+
+// 将数据打包备份至 Telegram
+async function backupToTelegram() {
+    if (!TG_BOT_TOKEN || !TG_CHAT_ID) return console.log('⚠️ 缺少 TG 环境变量，无法备份');
+    try {
+        const jsonStr = JSON.stringify(dbData, null, 2);
+        const blob = new Blob([jsonStr], { type: 'application/json' });
+        const formData = new FormData();
+        formData.append('chat_id', TG_CHAT_ID);
+        formData.append('document', blob, 'monitor_backup.json');
+        formData.append('caption', `📦 自动备份 | ${new Date().toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}\n\n💡 如果面板重启失忆，请直接转发此文件给我即可恢复！`);
+        
+        await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendDocument`, { method: 'POST', body: formData });
+        console.log('☁️ 数据库已成功备份至 Telegram！');
+    } catch (e) { console.log('❌ 备份至 Telegram 失败:', e.message); }
+}
+
+// 触发立即备份 (防抖)
+const triggerImmediateBackup = () => {
+    if(global.backupTimer) clearTimeout(global.backupTimer);
+    global.backupTimer = setTimeout(backupToTelegram, 5000);
+};
+
+// 定时任务：每 5 分钟常规备份一次
+setInterval(backupToTelegram, 5 * 60 * 1000);
+
+// Telegram 长轮询：监听用户发送的恢复文件
+let tgOffset = 0;
+async function pollTelegram() {
+    if (!TG_BOT_TOKEN) return;
+    try {
+        const res = await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/getUpdates?offset=${tgOffset}&timeout=20`);
+        if (res.ok) {
+            const data = await res.json();
+            for (const item of data.result) {
+                tgOffset = item.update_id + 1;
+                const msg = item.message;
+                if (msg && msg.document && msg.document.file_name && msg.document.file_name.includes('backup.json')) {
+                    console.log('📥 接收到备份文件，尝试恢复...');
+                    const fileRes = await fetch(`https://api.telegram.org/bot${TG_BOT_TOKEN}/getFile?file_id=${msg.document.file_id}`);
+                    const fileData = await fileRes.json();
+                    const filePath = fileData.result.file_path;
+                    const downloadRes = await fetch(`https://api.telegram.org/file/bot${TG_BOT_TOKEN}/${filePath}`);
+                    const jsonStr = await downloadRes.text();
+                    
+                    dbData = Object.assign(dbData, JSON.parse(jsonStr));
+                    console.log('✅ 数据库从 Telegram 恢复成功！');
+                    sendTelegramMsg('✅ <b>数据恢复成功！</b>\n所有监控节点和 12 小时延迟历史已重载。');
+                }
+            }
+        }
+    } catch(e) { }
+    setTimeout(pollTelegram, 2000);
+}
+
+// 容器启动信号
+if (TG_BOT_TOKEN && TG_CHAT_ID) {
+    sendTelegramMsg('⚠️ <b>监控面板已启动 / 重启</b>\n\n内存目前是空的。请将上面最近的一份 <code>monitor_backup.json</code> <b>转发给我</b> 即可恢复！\n(首次部署无需恢复，直接添加节点即可)');
+    pollTelegram();
+}
+
+// ==========================================
+// 核心安全：临时内存 SSH 密钥
+// ==========================================
 let MASTER_PUBLIC_KEY = '';
 let MASTER_PRIVATE_KEY = '';
 
 if (ENABLE_WEB_SSH) {
-    if (!fs.existsSync(SSH_KEY_DIR)) fs.mkdirSync(SSH_KEY_DIR, { recursive: true });
-    let needsGen = false;
-    if (!fs.existsSync(PRIVATE_KEY_PATH) || !fs.existsSync(PUBLIC_KEY_PATH)) {
-        needsGen = true;
-    } else {
-        const pub = fs.readFileSync(PUBLIC_KEY_PATH, 'utf-8');
-        if (!pub.startsWith('ssh-rsa AAA')) needsGen = true; 
-    }
-    if (needsGen) {
-        console.log('🔑 检测到密钥缺失或格式过旧，正在生成标准 OpenSSH 格式密钥对...');
-        if (fs.existsSync(PRIVATE_KEY_PATH)) fs.unlinkSync(PRIVATE_KEY_PATH);
-        if (fs.existsSync(PUBLIC_KEY_PATH)) fs.unlinkSync(PUBLIC_KEY_PATH);
-        execSync(`ssh-keygen -t rsa -b 2048 -m PEM -N "" -C "Server-Monitor-Pro-Master" -f "${PRIVATE_KEY_PATH}"`);
-        console.log('✅ 主控端专属 SSH 密钥对已安全生成！');
-    }
-    MASTER_PUBLIC_KEY = fs.readFileSync(PUBLIC_KEY_PATH, 'utf-8');
-    MASTER_PRIVATE_KEY = fs.readFileSync(PRIVATE_KEY_PATH, 'utf-8');
-} else {
-    console.log('🛡️ Web SSH 功能已通过环境变量关闭。不再生成或加载主控密钥。');
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', {
+        modulusLength: 2048,
+        publicKeyEncoding: { type: 'spki', format: 'openssh' },
+        privateKeyEncoding: { type: 'pkcs8', format: 'pem' }
+    });
+    MASTER_PUBLIC_KEY = publicKey;
+    MASTER_PRIVATE_KEY = privateKey;
+    console.log('✅ 内存 SSH 密钥对已生成。');
 }
 
-// 初始化表结构
-db.exec(`
-  CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
-  CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, username TEXT, created_at INTEGER);
-  CREATE TABLE IF NOT EXISTS servers (
-    id TEXT PRIMARY KEY, name TEXT, cpu TEXT, ram TEXT, disk TEXT, load_avg TEXT,
-    uptime TEXT, last_updated INTEGER, ram_total TEXT, net_rx TEXT, net_tx TEXT,
-    net_in_speed TEXT, net_out_speed TEXT, os TEXT, cpu_info TEXT, country TEXT,
-    server_group TEXT, price TEXT, expire_date TEXT, bandwidth TEXT, traffic_limit TEXT,
-    ip_v4 TEXT, ip_v6 TEXT, arch TEXT, boot_time TEXT, ram_used TEXT, swap_total TEXT,
-    swap_used TEXT, disk_total TEXT, disk_used TEXT, processes TEXT, tcp_conn TEXT, udp_conn TEXT,
-    ping_ct TEXT, ping_cu TEXT, ping_cm TEXT, ping_bd TEXT,
-    ssh_host TEXT, ssh_port TEXT, ssh_user TEXT, ssh_pass TEXT, lock_ip TEXT
-  );
-  CREATE TABLE IF NOT EXISTS metrics_history (
-    server_id TEXT, created_at INTEGER, 
-    ping_ct TEXT, ping_cu TEXT, ping_cm TEXT, ping_bd TEXT
-  );
-`);
-
-const addColumn = (table, column, def) => {
-    try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT DEFAULT '${def}'`); } catch (e) {}
-};
-addColumn('servers', 'ssh_host', ''); addColumn('servers', 'ssh_port', '22');
-addColumn('servers', 'ssh_user', 'root'); addColumn('servers', 'ssh_pass', '');
-addColumn('servers', 'ping_ct', '0'); addColumn('servers', 'ping_cu', '0');
-addColumn('servers', 'ping_cm', '0'); addColumn('servers', 'ping_bd', '0');
-addColumn('servers', 'lock_ip', '0');
-
 const formatBytes = (bytes) => {
-    const b = parseInt(bytes);
-    if (isNaN(b) || b === 0) return '0 B';
+    const b = parseInt(bytes); if (isNaN(b) || b === 0) return '0 B';
     const k = 1024; const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.floor(Math.log(b) / Math.log(k));
     return parseFloat((b / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 };
 
-const getSysSettings = () => {
-    let sys = { site_title: '⚡ Server Monitor Pro', admin_title: '⚙️ 资产与探针控制台', theme: 'theme1', custom_bg: '', is_public: 'true', show_price: 'true', show_expire: 'true', show_bw: 'true', show_tf: 'true', tg_notify: 'false', tg_bot_token: '', tg_chat_id: '' };
-    try { db.prepare('SELECT * FROM settings').all().forEach(r => sys[r.key] = r.value); } catch (e) {}
-    return sys;
-};
+const getSysSettings = () => dbData.settings;
 
+// ==========================================
+// 鉴权逻辑 (GitHub OAuth)
+// ==========================================
 const parseCookies = (request) => {
     const list = {}; const rc = request.headers.cookie;
     rc && rc.split(';').forEach(cookie => { const parts = cookie.split('='); list[parts.shift().trim()] = decodeURI(parts.join('=')); });
@@ -122,7 +147,7 @@ const parseCookies = (request) => {
 const checkWebAuth = (req) => {
     const token = parseCookies(req)['admin_session'];
     if (!token) return false;
-    const session = db.prepare('SELECT * FROM sessions WHERE token = ?').get(token);
+    const session = dbData.sessions[token];
     return session && (Date.now() - session.created_at < 7 * 24 * 3600 * 1000);
 };
 
@@ -135,51 +160,47 @@ const requireWebAuth = (req, res, next) => {
 };
 
 app.get('/auth/github', (req, res) => {
-    if (!GITHUB_CLIENT_ID) return res.send('系统未配置 GitHub Client ID 环境变量！请先在容器配置中添加。');
+    if (!GITHUB_CLIENT_ID) return res.send('未配置 GITHUB_CLIENT_ID');
     res.redirect(`https://github.com/login/oauth/authorize?client_id=${GITHUB_CLIENT_ID}`);
 });
 
 app.get('/auth/github/callback', async (req, res) => {
     const code = req.query.code;
-    if (!code) return res.send('授权失败：未提供 Code');
+    if (!code) return res.send('授权失败');
     try {
         const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
             method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
             body: JSON.stringify({ client_id: GITHUB_CLIENT_ID, client_secret: GITHUB_CLIENT_SECRET, code: code })
         });
         const tokenData = await tokenRes.json();
-        if (tokenData.error) return res.send('GitHub Auth Error: ' + tokenData.error_description);
-
         const userRes = await fetch('https://api.github.com/user', { headers: { 'Authorization': `Bearer ${tokenData.access_token}`, 'User-Agent': 'Server-Monitor-Pro' } });
         const userData = await userRes.json();
         const username = (userData.login || '').toLowerCase();
 
         if (GITHUB_ALLOWED_USERS.length > 0 && !GITHUB_ALLOWED_USERS.includes(username)) {
-            return res.status(403).send(`<h2>❌ 拒绝访问</h2><p>您的 GitHub 账号 (@${username}) 不在系统白名单中。</p><a href="/">返回首页</a>`);
+            return res.status(403).send(`❌ 拒绝访问：不在白名单`);
         }
 
         const sessionToken = crypto.randomBytes(32).toString('hex');
-        db.prepare('INSERT INTO sessions (token, username, created_at) VALUES (?, ?, ?)').run(sessionToken, username, Date.now());
+        dbData.sessions[sessionToken] = { username, created_at: Date.now() };
+        triggerImmediateBackup();
         res.cookie('admin_session', sessionToken, { maxAge: 7 * 24 * 3600 * 1000, httpOnly: true });
         res.redirect('/admin');
-    } catch (err) { res.status(500).send('Authentication failed.'); }
+    } catch (err) { res.status(500).send('Auth Error'); }
 });
 
 app.get('/logout', (req, res) => {
     const token = parseCookies(req)['admin_session'];
-    if (token) db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+    if (token) delete dbData.sessions[token];
     res.clearCookie('admin_session');
     res.redirect('/');
 });
 
 // ==========================================
-// Web SSH 终端逻辑 (受控于 ENABLE_WEB_SSH 开关)
+// Web SSH 终端
 // ==========================================
 app.ws('/ssh', (ws, req) => {
-    if (!ENABLE_WEB_SSH) {
-        ws.send(JSON.stringify({ type: 'error', msg: '管理员已在服务端关闭了 Web SSH 功能。' }));
-        ws.close(); return;
-    }
+    if (!ENABLE_WEB_SSH) { ws.send(JSON.stringify({ type: 'error', msg: '管理员已关闭 Web SSH 功能。' })); ws.close(); return; }
     if (!checkWebAuth(req)) { ws.send(JSON.stringify({ type: 'error', msg: '会话已过期，请重新登录！' })); ws.close(); return; }
     const conn = new Client();
     let streamObj = null;
@@ -188,134 +209,104 @@ app.ws('/ssh', (ws, req) => {
         try {
             const data = JSON.parse(msg);
             if (data.type === 'connect') {
-                const server = db.prepare('SELECT ssh_host, ssh_port, ssh_user, ssh_pass FROM servers WHERE id = ?').get(data.serverId);
-                if (!server) return ws.send(JSON.stringify({ type: 'error', msg: '找不到服务器记录！' }));
-
-                const targetHost = data.host || server.ssh_host;
-                const targetPort = parseInt(data.port || server.ssh_port || 22);
-                const authUser = data.username || server.ssh_user || 'root';
-                const authPass = data.password || server.ssh_pass || '';
-
-                if (!targetHost) { ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 缺少 IP 地址！\r\n' })); return; }
-
-                const sshConfig = { username: authUser, tryKeyboard: true, readyTimeout: 20000 };
-                if (authPass) sshConfig.password = authPass;
+                const server = dbData.servers[data.serverId];
+                if (!server) return;
+                const sshConfig = { username: data.username || server.ssh_user || 'root', tryKeyboard: true, readyTimeout: 20000 };
+                if (data.password || server.ssh_pass) sshConfig.password = data.password || server.ssh_pass;
                 else sshConfig.privateKey = MASTER_PRIVATE_KEY;
                 
-                const isIPv6 = targetHost.includes(':');
+                const targetHost = data.host || server.ssh_host;
+                const targetPort = parseInt(data.port || server.ssh_port || 22);
 
                 conn.on('ready', () => {
-                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n✅ 鉴权成功，已连接到服务器...\r\n' }));
+                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n✅ 已连接...\r\n' }));
                     conn.shell({ term: 'xterm-256color' }, (err, stream) => {
-                        if (err) return ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ Shell 创建失败: ' + err.message + '\r\n' }));
                         streamObj = stream;
                         stream.on('data', (d) => ws.send(JSON.stringify({ type: 'data', data: d.toString('utf-8') })));
-                        stream.on('close', () => { ws.send(JSON.stringify({ type: 'status', msg: '\r\n🔌 连接已断开。\r\n' })); conn.end(); ws.close(); });
+                        stream.on('close', () => { conn.end(); ws.close(); });
                     });
-                }).on('error', (err) => { ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 连接失败: ' + err.message + '\r\n' })); })
-                  .on('keyboard-interactive', (name, instr, lang, prompts, finish) => {
-                    if (prompts.length > 0 && prompts[0].prompt.toLowerCase().includes('password')) finish([authPass]); else finish([]);
-                });
+                }).on('error', (err) => { ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ 失败: ' + err.message })); });
 
-                if (isIPv6) {
-                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n🌐 探测到 IPv6 目标，通过本机内置 WARP 代理穿透...\r\n' }));
-                    SocksClient.createConnection({
-                        proxy: { ipaddress: WARP_SOCKS_HOST, port: WARP_SOCKS_PORT, type: 5 },
-                        command: 'connect', destination: { host: targetHost, port: targetPort }
-                    }, (err, info) => {
-                        if (err) return ws.send(JSON.stringify({ type: 'error', msg: '\r\n❌ WARP IPv6 代理失败: ' + err.message + '\r\n' }));
-                        conn.connect({ sock: info.socket, ...sshConfig });
+                if (targetHost.includes(':')) {
+                    SocksClient.createConnection({ proxy: { ipaddress: WARP_SOCKS_HOST, port: WARP_SOCKS_PORT, type: 5 }, command: 'connect', destination: { host: targetHost, port: targetPort } }, (err, info) => {
+                        if (!err) conn.connect({ sock: info.socket, ...sshConfig });
                     });
-                } else {
-                    ws.send(JSON.stringify({ type: 'status', msg: '\r\n🌐 探测到 IPv4 目标，发起原生直连...\r\n' }));
-                    conn.connect({ host: targetHost, port: targetPort, ...sshConfig });
-                }
+                } else { conn.connect({ host: targetHost, port: targetPort, ...sshConfig }); }
             } else if (data.type === 'data' && streamObj) streamObj.write(data.data);
             else if (data.type === 'resize' && streamObj) streamObj.setWindow(data.rows, data.cols, 800, 600);
         } catch (e) {}
     });
-    ws.on('close', () => conn.end());
 });
 
-const sendTelegram = async (sys, msg) => {
-    if (sys.tg_notify !== 'true' || !sys.tg_bot_token || !sys.tg_chat_id) return;
-    try { await fetch(`https://api.telegram.org/bot${sys.tg_bot_token}/sendMessage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: sys.tg_chat_id, text: msg, parse_mode: 'HTML' }) }); } catch (e) {}
-};
-
-const checkOfflineNodes = async () => {
-    const sys = getSysSettings();
-    if (sys.tg_notify !== 'true') return;
-    try {
-        const allServers = db.prepare('SELECT id, name, last_updated FROM servers').all();
-        let alertState = {};
-        const stateRes = db.prepare("SELECT value FROM settings WHERE key = 'alert_state'").get();
-        if (stateRes) alertState = JSON.parse(stateRes.value);
-
-        let stateChanged = false; const now = Date.now();
-
-        for (const s of allServers) {
-            const isOffline = (now - s.last_updated) > 120000;
-            if (isOffline && !alertState[s.id]) {
-                await sendTelegram(sys, `⚠️ <b>节点离线告警</b>\n\n<b>节点名称:</b> ${s.name}\n<b>状态:</b> 离线 (超过2分钟未上报)\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}`);
-                alertState[s.id] = true; stateChanged = true;
-            } else if (!isOffline && alertState[s.id]) {
-                await sendTelegram(sys, `✅ <b>节点恢复通知</b>\n\n<b>节点名称:</b> ${s.name}\n<b>状态:</b> 恢复在线\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}`);
-                delete alertState[s.id]; stateChanged = true;
-            }
-        }
-        if (stateChanged) db.prepare('INSERT INTO settings (key, value) VALUES ("alert_state", ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(JSON.stringify(alertState));
-    } catch (e) {}
-};
-
+// ==========================================
+// 业务 API
+// ==========================================
 app.post('/admin/api', requireWebAuth, (req, res) => {
-    try {
-        const data = req.body;
-        if (data.action === 'save_settings') {
-            const stmt = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
-            db.transaction(() => { for (const [k, v] of Object.entries(data.settings)) stmt.run(k, v); })();
-            res.json({ success: true });
-        } 
-        else if (data.action === 'add') {
-            db.prepare(`INSERT INTO servers (id, name, cpu, ram, disk, load_avg, uptime, last_updated, ram_total, net_rx, net_tx, net_in_speed, net_out_speed, os, cpu_info, country, server_group, price, expire_date, bandwidth, traffic_limit, ip_v4, ip_v6, ping_ct, ping_cu, ping_cm, ping_bd, ssh_host, ssh_port, ssh_user, ssh_pass, lock_ip) VALUES (?, ?, '0', '0', '0', '0', '0', 0, '0', '0', '0', '0', '0', '', '', '', '默认分组', '免费', '', '', '', '0', '0', '0', '0', '0', '0', '', '22', 'root', '', '0')`).run(crypto.randomUUID(), data.name || 'New Server');
-            res.json({ success: true });
-        } 
-        else if (data.action === 'delete') {
-            db.prepare('DELETE FROM servers WHERE id = ?').run(data.id);
-            res.json({ success: true });
-        } 
-        else if (data.action === 'edit') {
-            const lockIp = data.ssh_host ? '1' : '0';
-            db.prepare(`UPDATE servers SET server_group = ?, price = ?, expire_date = ?, bandwidth = ?, traffic_limit = ?, ssh_host = ?, ssh_port = ?, ssh_user = ?, ssh_pass = ?, lock_ip = ? WHERE id = ?`).run(data.server_group || '默认分组', data.price || '', data.expire_date || '', data.bandwidth || '', data.traffic_limit || '', data.ssh_host || '', data.ssh_port || '22', data.ssh_user || 'root', data.ssh_pass || '', lockIp, data.id);
-            res.json({ success: true });
-        }
-    } catch (e) { res.status(400).json({ error: e.message }); }
+    const data = req.body;
+    if (data.action === 'save_settings') Object.assign(dbData.settings, data.settings);
+    else if (data.action === 'add') dbData.servers[crypto.randomUUID()] = { name: data.name || 'New Server', last_updated: 0, lock_ip: '0' };
+    else if (data.action === 'delete') delete dbData.servers[data.id];
+    else if (data.action === 'edit' && dbData.servers[data.id]) {
+        const s = dbData.servers[data.id];
+        Object.assign(s, data);
+        s.lock_ip = data.ssh_host ? '1' : '0';
+    }
+    triggerImmediateBackup();
+    res.json({ success: true });
 });
 
 app.get('/api/server', (req, res) => {
-    const sys = getSysSettings();
-    if (sys.is_public !== 'true' && !checkWebAuth(req)) return res.status(401).send('Unauthorized');
-    const id = req.query.id;
-    if (!id) return res.status(400).send('Miss ID');
-    const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(id);
-    if (!server) return res.status(404).send('Not Found');
-    if (!checkWebAuth(req)) { delete server.ssh_pass; delete server.ssh_user; delete server.ssh_host; }
-    res.json(server);
+    const s = dbData.servers[req.query.id];
+    if (!s) return res.status(404).send();
+    const cleanS = { ...s };
+    if (!checkWebAuth(req)) { delete cleanS.ssh_pass; delete cleanS.ssh_user; delete cleanS.ssh_host; }
+    res.json(cleanS);
 });
 
 app.get('/api/ping-history', (req, res) => {
+    res.json(dbData.metrics_history.filter(h => h.server_id === req.query.id));
+});
+
+app.get('/update-pubkey', (req, res) => res.send(MASTER_PUBLIC_KEY));
+
+app.post('/update', (req, res) => {
+    const { id, secret, metrics, ssh_host, ssh_port } = req.body;
+    if (secret !== API_SECRET || !dbData.servers[id]) return res.status(401).send();
+    
+    const s = dbData.servers[id];
+    const final_host = s.lock_ip === '1' ? s.ssh_host : (ssh_host || '');
+    Object.assign(s, metrics, { last_updated: Date.now(), ssh_host: final_host, ssh_port: ssh_port || '22', country: req.headers['cf-ipcountry'] || 'XX' });
+
+    const now = Date.now();
+    if (!s._l || now - s._l > 60000) {
+        dbData.metrics_history.push({ server_id: id, created_at: now, ...metrics });
+        dbData.metrics_history = dbData.metrics_history.slice(-1000);
+        s._l = now;
+    }
+    
+    // 离线告警检查
     const sys = getSysSettings();
-    if (sys.is_public !== 'true' && !checkWebAuth(req)) return res.status(401).send('Unauthorized');
-    const id = req.query.id;
-    if (!id) return res.status(400).send('Miss ID');
-    const history = db.prepare('SELECT created_at, ping_ct, ping_cu, ping_cm, ping_bd FROM metrics_history WHERE server_id = ? ORDER BY created_at ASC').all(id);
-    res.json(history);
+    if (sys.tg_notify === 'true') {
+        let alertState = JSON.parse(sys.alert_state || '{}');
+        let stateChanged = false;
+        for (const [sid, srv] of Object.entries(dbData.servers)) {
+            const isOffline = (now - srv.last_updated) > 120000;
+            if (isOffline && !alertState[sid]) {
+                sendTelegramMsg(`⚠️ <b>节点离线告警</b>\n\n<b>节点名称:</b> ${srv.name}`);
+                alertState[sid] = true; stateChanged = true;
+            } else if (!isOffline && alertState[sid]) {
+                sendTelegramMsg(`✅ <b>节点恢复通知</b>\n\n<b>节点名称:</b> ${srv.name}`);
+                delete alertState[sid]; stateChanged = true;
+            }
+        }
+        if (stateChanged) { dbData.settings.alert_state = JSON.stringify(alertState); triggerImmediateBackup(); }
+    }
+    res.send('OK');
 });
 
-app.get('/update-pubkey', (req, res) => {
-    res.setHeader('Content-Type', 'text/plain;charset=UTF-8');
-    res.send(MASTER_PUBLIC_KEY);
-});
-
+// ==========================================
+// UI 前端渲染
+// ==========================================
 const getThemeStyles = (sys) => `
     body.theme2 { background-color: #0d1117; color: #c9d1d9; }
     .theme2 .vps-card, .theme2 .global-stats, .theme2 .header-card, .theme2 .chart-card { background: #161b22; color: #c9d1d9; box-shadow: 0 4px 6px rgba(0,0,0,0.4); border: 1px solid #30363d; }
@@ -356,36 +347,33 @@ const getThemeStyles = (sys) => `
     .ping-box { font-size:11px; margin-top:10px; display:flex; gap:10px; padding: 6px 8px; border-radius: 4px; flex-wrap:wrap; background: rgba(150,150,150,0.1); border: 1px solid rgba(150,150,150,0.2); }
     ${sys.custom_bg ? `body { background: url('${sys.custom_bg}') no-repeat center center fixed !important; background-size: cover !important; } .vps-card, .global-stats, .header-card, .chart-card { background: rgba(255, 255, 255, 0.4) !important; backdrop-filter: blur(12px) !important; -webkit-backdrop-filter: blur(12px) !important; border: 1px solid rgba(255, 255, 255, 0.6) !important; box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.1) !important; color: #111 !important; } .vps-card:hover { background: rgba(255, 255, 255, 0.6) !important; transform: translateY(-3px); } .group-header { color: #fff !important; text-shadow: 0 2px 5px rgba(0,0,0,0.6) !important; border-left-color: #fff !important; } .stat-val, .g-val, .card-title { color: #000 !important; font-weight: 800 !important; } .stat-label, .g-label, .g-sub, .card-meta { color: #333 !important; font-weight: 600 !important; } .stat-bar { background: rgba(0,0,0,0.1) !important; }` : ''}
 `;
-
-const footerHtml = `<div style="text-align: center; margin-top: 40px; padding-bottom: 20px; font-size: 13px; color: inherit; opacity: 0.8;">Powered by CF-Server-Monitor-Pro | Node.js All-in-One WARP Edition</div>`;
+const footerHtml = `<div style="text-align: center; margin-top: 40px; padding-bottom: 20px; font-size: 13px; color: inherit; opacity: 0.8;">Powered by CF-Server-Monitor-Pro | Stateless Telegram Edition</div>`;
 
 app.get('/admin', requireWebAuth, (req, res) => {
     const sys = getSysSettings();
-    const results = db.prepare('SELECT id, name, last_updated, server_group, price, expire_date, bandwidth, traffic_limit, ssh_host, ssh_port, ssh_user FROM servers').all();
     const now = Date.now();
     const host = `${req.protocol}://${req.get('host')}`;
     let trs = '';
     
-    // 【核心】根据全局变量决定是否渲染 SSH 按钮
     const sshBtnHtml = (id, name, host, port, user) => {
         if (!ENABLE_WEB_SSH) return '';
         return `<button onclick="openSshModal('${id}', '${name}', '${host||''}', '${port||'22'}', '${user||'root'}')" class="btn btn-green">💻 SSH</button>`;
     };
 
-    if (results && results.length > 0) {
-        for (const s of results) {
+    if (Object.keys(dbData.servers).length > 0) {
+        for (const [id, s] of Object.entries(dbData.servers)) {
             const isOnline = (now - s.last_updated) < 30000;
             const status = isOnline ? '<span style="color:green; font-weight:bold;">在线</span>' : '<span style="color:red; font-weight:bold;">离线</span>';
-            const cmd = `curl -sL ${host}/install.sh | bash -s ${s.id} ${API_SECRET}`;
-            trs += `<tr><td>${s.name}</td><td>${s.server_group || '默认分组'}</td><td>${status}</td><td><input type="text" readonly value="${cmd}" style="width:280px; padding:6px; margin-right:5px; border:1px solid #ccc; border-radius:4px;" id="cmd-${s.id}"><button onclick="copyCmd('${s.id}')" class="btn btn-gray">复制</button><button onclick="openEditModal('${s.id}', '${s.server_group||''}', '${s.price||''}', '${s.expire_date||''}', '${s.bandwidth||''}', '${s.traffic_limit||''}', '${s.ssh_host||''}', '${s.ssh_port||'22'}', '${s.ssh_user||'root'}')" class="btn btn-blue">✏️ 编辑</button>${sshBtnHtml(s.id, s.name, s.ssh_host, s.ssh_port, s.ssh_user)}<button onclick="deleteServer('${s.id}')" class="btn btn-red">🗑️ 删除</button></td></tr>`;
+            const cmd = `curl -sL ${host}/install.sh | bash -s ${id} ${API_SECRET}`;
+            trs += `<tr><td>${s.name}</td><td>${s.server_group || '默认分组'}</td><td>${status}</td><td><input type="text" readonly value="${cmd}" style="width:280px; padding:6px; margin-right:5px; border:1px solid #ccc; border-radius:4px;" id="cmd-${id}"><button onclick="copyCmd('${id}')" class="btn btn-gray">复制</button><button onclick="openEditModal('${id}', '${s.server_group||''}', '${s.price||''}', '${s.expire_date||''}', '${s.bandwidth||''}', '${s.traffic_limit||''}', '${s.ssh_host||''}', '${s.ssh_port||'22'}', '${s.ssh_user||'root'}')" class="btn btn-blue">✏️ 编辑</button>${sshBtnHtml(id, s.name, s.ssh_host, s.ssh_port, s.ssh_user)}<button onclick="deleteServer('${id}')" class="btn btn-red">🗑️ 删除</button></td></tr>`;
         }
     }
 
     const sshModalHtml = ENABLE_WEB_SSH ? `
-      <div id="sshModal" class="modal"><div class="modal-content modal-large"><h3 style="margin-top:0; display:flex; justify-content:space-between; align-items:center;"><span>💻 Web SSH 直连 - <span id="sshTargetName"></span></span><button onclick="closeSshModal()" style="border:none; background:none; font-size:20px; cursor:pointer;">✖</button></h3><input type="hidden" id="sshServerId"><div style="display:flex; gap:10px; margin-bottom: 15px; align-items:flex-end;"><div style="flex:1;"><label>目标IP/域名</label><input type="text" id="sshHost"></div><div style="width:80px;"><label>端口</label><input type="text" id="sshPort"></div><div style="width:120px;"><label>用户名</label><input type="text" id="sshUser"></div><div style="flex:1;"><label>密码(可空)</label><input type="password" id="sshPass" placeholder="🔑 已全自动发卡免密"></div><button onclick="connectSsh()" class="btn btn-green" style="padding: 10px 20px; margin-bottom:12px;">⚡ 连接</button></div><div class="preset-btns"><button class="preset-btn" onclick="sendCmd('clear\\n')">🧹 清屏</button><button class="preset-btn" onclick="sendCmd('apt update && apt upgrade -y\\n')">🔄 更新系统</button><button class="preset-btn" onclick="sendCmd('curl -sL yabs.sh | bash\\n')">🛠️ 综合测试</button></div><div id="terminal-container"></div></div></div>
+      <div id="sshModal" class="modal"><div class="modal-content modal-large"><h3 style="margin-top:0; display:flex; justify-content:space-between; align-items:center;"><span>💻 Web SSH 直连 - <span id="sshTargetName"></span></span><button onclick="closeSshModal()" style="border:none; background:none; font-size:20px; cursor:pointer;">✖</button></h3><input type="hidden" id="sshServerId"><div style="display:flex; gap:10px; margin-bottom: 15px; align-items:flex-end;"><div style="flex:1;"><label>目标IP/域名</label><input type="text" id="sshHost"></div><div style="width:80px;"><label>端口</label><input type="text" id="sshPort"></div><div style="width:120px;"><label>用户名</label><input type="text" id="sshUser"></div><div style="flex:1;"><label>密码(可空)</label><input type="password" id="sshPass" placeholder="🔑 内存级免密直连"></div><button onclick="connectSsh()" class="btn btn-green" style="padding: 10px 20px; margin-bottom:12px;">⚡ 连接</button></div><div class="preset-btns"><button class="preset-btn" onclick="sendCmd('clear\\n')">🧹 清屏</button><button class="preset-btn" onclick="sendCmd('apt update && apt upgrade -y\\n')">🔄 更新系统</button><button class="preset-btn" onclick="sendCmd('curl -sL yabs.sh | bash\\n')">🛠️ 综合测试</button></div><div id="terminal-container"></div></div></div>
     ` : '';
     
-    res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${sys.admin_title}</title><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" /><script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script><script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script><style>body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 20px; background: #f0f2f5; color: #333;} .card { background: white; padding: 25px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); max-width: 1200px; margin: 0 auto 20px auto; position: relative;} h2 { margin-top: 0; border-bottom: 2px solid #f0f2f5; padding-bottom: 10px; font-size: 20px;} table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px; } th, td { border: 1px solid #eee; padding: 12px; text-align: left; } th { background: #f8f9fa; } .btn { cursor: pointer; border-radius: 4px; font-size: 13px; transition: opacity 0.2s; border: none; padding: 6px 10px; color: white; margin-left: 5px; text-decoration: none;} .btn:hover { opacity: 0.8; } .btn-blue { background: #3b82f6; } .btn-green { background: #10b981; } .btn-red { background: #ef4444; } .btn-gray { background: #6b7280; } .btn-purple { background: #8b5cf6; } .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; } .form-group { display: flex; flex-direction: column; margin-bottom: 15px; } .form-group label { font-size: 14px; font-weight: 600; margin-bottom: 6px; color: #555;} .form-group input, .form-group select { padding: 10px; border: 1px solid #ccc; border-radius: 6px; } .checkbox-group { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 14px;} .checkbox-group input { width: 18px; height: 18px; cursor: pointer; } .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 100; } .modal-content { background: white; padding: 20px; border-radius: 8px; width: 450px; margin: 100px auto; position: relative;} .modal-large { width: 850px; margin: 50px auto; } .modal input { width: 100%; padding: 8px; margin-bottom: 12px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;} #terminal-container { height: 450px; background: #000; padding: 10px; border-radius: 6px; margin-top: 15px; } .preset-btns { display: flex; gap: 8px; margin-bottom: 15px; flex-wrap: wrap; } .preset-btn { background: #e5e7eb; border: 1px solid #d1d5db; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; font-family: monospace; color: #374151; }</style></head><body><div class="card"><a href="/logout" class="btn btn-red" style="position: absolute; right: 25px; top: 25px; font-weight: bold; padding: 8px 15px;">退出登录</a><h2>🛠️ 全局设置</h2><div class="settings-grid"><div><div class="form-group"><label>🎨 前端主题风格</label><select id="cfg_theme"><option value="theme1" ${sys.theme === 'theme1' ? 'selected' : ''}>1. 默认清爽白</option><option value="theme2" ${sys.theme === 'theme2' ? 'selected' : ''}>2. 暗黑极客</option><option value="theme3" ${sys.theme === 'theme3' ? 'selected' : ''}>3. 新粗野主义</option><option value="theme4" ${sys.theme === 'theme4' ? 'selected' : ''}>4. 动态渐变</option><option value="theme5" ${sys.theme === 'theme5' ? 'selected' : ''}>5. 赛博朋克</option></select></div><div class="form-group"><label>🖼️ 自定义背景图片 URL</label><input type="text" id="cfg_custom_bg" value="${sys.custom_bg || ''}"></div><div class="form-group"><label>前台看板标题</label><input type="text" id="cfg_site_title" value="${sys.site_title}"></div><div class="form-group"><label>后台标签栏名称</label><input type="text" id="cfg_admin_title" value="${sys.admin_title}"></div></div><div><label style="font-size: 14px; font-weight: 600; margin-bottom: 10px; display: block; color: #555;">👁️ 前台展示控制</label><div class="checkbox-group"><input type="checkbox" id="cfg_is_public" ${sys.is_public === 'true' ? 'checked' : ''}><label><b>公开访问</b></label></div><div class="checkbox-group"><input type="checkbox" id="cfg_show_price" ${sys.show_price === 'true' ? 'checked' : ''}><label>显示 <b>价格</b></label></div><div class="checkbox-group"><input type="checkbox" id="cfg_show_expire" ${sys.show_expire === 'true' ? 'checked' : ''}><label>显示 <b>到期时间</b></label></div><div class="checkbox-group"><input type="checkbox" id="cfg_show_bw" ${sys.show_bw === 'true' ? 'checked' : ''}><label>显示 <b>带宽徽章</b></label></div><div class="checkbox-group"><input type="checkbox" id="cfg_show_tf" ${sys.show_tf === 'true' ? 'checked' : ''}><label>显示 <b>流量配额徽章</b></label></div><hr style="margin: 20px 0; border: none; border-top: 1px dashed #ccc;"><label style="font-size: 14px; font-weight: 600; margin-bottom: 10px; display: block; color: #e63946;">✈️ Telegram 离线告警设置</label><div class="form-group"><label>开启离线通知</label><select id="cfg_tg_notify"><option value="false" ${sys.tg_notify !== 'true' ? 'selected' : ''}>关闭告警</option><option value="true" ${sys.tg_notify === 'true' ? 'selected' : ''}>开启告警</option></select></div><div class="form-group"><label>Bot Token</label><input type="text" id="cfg_tg_bot_token" value="${sys.tg_bot_token || ''}"></div><div class="form-group"><label>Chat ID</label><input type="text" id="cfg_tg_chat_id" value="${sys.tg_chat_id || ''}"></div></div></div><button onclick="saveSettings()" class="btn btn-blue" style="padding: 10px 20px; font-size: 15px;">💾 保存全局设置</button></div><div class="card"><h2>${sys.admin_title} - 节点列表</h2><div style="margin-bottom: 15px;"><input type="text" id="newName" placeholder="输入新服务器名称" style="padding: 8px; width: 200px; border:1px solid #ccc; border-radius:4px;"><button onclick="addServer()" class="btn btn-blue" style="padding: 9px 15px;">+ 添加新服务器</button><a href="/" style="float: right; margin-top: 8px; color: #3b82f6; text-decoration: none; font-weight:bold;">👉 前往大盘预览</a></div><table><tr><th>节点名称</th><th>分组</th><th>在线状态</th><th>操作</th></tr>${trs || '<tr><td colspan="4" style="text-align:center; padding: 30px; color:#666;">暂无服务器，请在上方添加</td></tr>'}</table></div><div id="editModal" class="modal"><div class="modal-content"><h3 style="margin-top:0;">✏️ 编辑服务器信息</h3><input type="hidden" id="editId"><div style="display:flex; gap:10px;"><div style="flex:1"><label>分组名称</label> <input type="text" id="editGroup"></div><div style="flex:1"><label>价格</label> <input type="text" id="editPrice"></div></div><label>到期时间</label> <input type="date" id="editExpire"><div style="display:flex; gap:10px;"><div style="flex:1"><label>带宽</label> <input type="text" id="editBandwidth"></div><div style="flex:1"><label>流量总量</label> <input type="text" id="editTraffic"></div></div><hr style="margin: 15px 0; border: none; border-top: 1px dashed #ccc;">${ENABLE_WEB_SSH ? `<label style="color:#8b5cf6;">💻 SSH 直连高级配置</label><div style="display:flex; gap:10px;"><div style="flex:1"><label>连接 IP</label><input type="text" id="editSshHost" placeholder="填入将永久锁定，清空恢复自动获取"></div><div style="width:70px"><label>端口</label><input type="text" id="editSshPort"></div></div><div style="display:flex; gap:10px;"><div style="flex:1"><label>用户名</label><input type="text" id="editSshUser"></div><div style="flex:1"><label>临时密码</label><input type="password" id="editSshPass" placeholder="(无需填)"></div></div>` : ''}<div style="text-align: right; margin-top: 10px;"><button onclick="closeModal('editModal')" style="padding: 8px 15px; border: 1px solid #ccc; background: white; margin-right: 5px; cursor:pointer;">取消</button><button onclick="saveEdit()" class="btn btn-blue" style="padding: 8px 15px;">保存更改</button></div></div></div>${sshModalHtml}<script>async function apiCall(data) { const res = await fetch('/admin/api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }); if (res.status === 401) { alert('⚠️ 会话已过期，请点击确定后重新授权登录！'); location.reload(); return false; } if (!res.ok) { alert('操作失败'); return false; } return true; } async function saveSettings() { const data = { action: 'save_settings', settings: { theme: document.getElementById('cfg_theme').value, custom_bg: document.getElementById('cfg_custom_bg').value, site_title: document.getElementById('cfg_site_title').value, admin_title: document.getElementById('cfg_admin_title').value, is_public: document.getElementById('cfg_is_public').checked ? 'true' : 'false', show_price: document.getElementById('cfg_show_price').checked ? 'true' : 'false', show_expire: document.getElementById('cfg_show_expire').checked ? 'true' : 'false', show_bw: document.getElementById('cfg_show_bw').checked ? 'true' : 'false', show_tf: document.getElementById('cfg_show_tf').checked ? 'true' : 'false', tg_notify: document.getElementById('cfg_tg_notify').value, tg_bot_token: document.getElementById('cfg_tg_bot_token').value, tg_chat_id: document.getElementById('cfg_tg_chat_id').value } }; if (await apiCall(data)) { alert('✅ 设置已保存！'); location.reload(); } } async function addServer() { const name = document.getElementById('newName').value; if (!name) return alert('请输入名称'); if (await apiCall({ action: 'add', name })) location.reload(); } async function deleteServer(id) { if (!confirm('确定要删除这个节点吗？')) return; if (await apiCall({ action: 'delete', id })) location.reload(); } function copyCmd(id) { const input = document.getElementById('cmd-' + id); input.select(); document.execCommand('copy'); alert('✅ 一键安装命令已复制！'); } function openEditModal(id, group, price, expire, bw, traffic, shost, sport, suser) { document.getElementById('editId').value = id; document.getElementById('editGroup').value = group || '默认分组'; document.getElementById('editPrice').value = price || '免费'; document.getElementById('editExpire').value = expire || ''; document.getElementById('editBandwidth').value = bw || ''; document.getElementById('editTraffic').value = traffic || ''; if (${ENABLE_WEB_SSH}) { document.getElementById('editSshHost').value = shost || ''; document.getElementById('editSshPort').value = sport || '22'; document.getElementById('editSshUser').value = suser || 'root'; document.getElementById('editSshPass').value = ''; } document.getElementById('editModal').style.display = 'block'; } function closeModal(id) { document.getElementById(id).style.display = 'none'; } async function saveEdit() { const data = { action: 'edit', id: document.getElementById('editId').value, server_group: document.getElementById('editGroup').value, price: document.getElementById('editPrice').value, expire_date: document.getElementById('editExpire').value, bandwidth: document.getElementById('editBandwidth').value, traffic_limit: document.getElementById('editTraffic').value }; if (${ENABLE_WEB_SSH}) { data.ssh_host = document.getElementById('editSshHost').value; data.ssh_port = document.getElementById('editSshPort').value; data.ssh_user = document.getElementById('editSshUser').value; data.ssh_pass = document.getElementById('editSshPass').value; } if (await apiCall(data)) location.reload(); } let term, fitAddon, ws, termListener; function openSshModal(id, name, host, port, user) { document.getElementById('sshServerId').value = id; document.getElementById('sshTargetName').innerText = name; document.getElementById('sshHost').value = host || ''; document.getElementById('sshPort').value = port || '22'; document.getElementById('sshUser').value = user || 'root'; document.getElementById('sshPass').value = ''; document.getElementById('sshModal').style.display = 'block'; if (!term) { term = new Terminal({ cursorBlink: true, theme: { background: '#000' } }); fitAddon = new FitAddon.FitAddon(); term.loadAddon(fitAddon); term.open(document.getElementById('terminal-container')); } setTimeout(() => fitAddon.fit(), 100); term.reset(); term.writeln('Welcome to Web SSH Terminal.'); if(host) { term.writeln('\\x1b[36m✨ 探针已上报IP，正在进行 V4/V6 智能握手连接...\\x1b[0m'); setTimeout(connectSsh, 500); } } function closeSshModal() { document.getElementById('sshModal').style.display = 'none'; if (ws && ws.readyState === WebSocket.OPEN) ws.close(); } function connectSsh() { const serverId = document.getElementById('sshServerId').value; const host = document.getElementById('sshHost').value; const port = document.getElementById('sshPort').value; const username = document.getElementById('sshUser').value; const password = document.getElementById('sshPass').value; if (ws) ws.close(); term.reset(); term.writeln('\\x1b[33mConnecting to ' + host + '...\\x1b[0m'); const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'; ws = new WebSocket(protocol + '//' + location.host + '/ssh'); ws.onopen = () => { ws.send(JSON.stringify({ type: 'connect', serverId, host, port, username, password })); if (termListener) termListener.dispose(); termListener = term.onData(data => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'data', data })); }); }; ws.onmessage = (event) => { const msg = JSON.parse(event.data); if (msg.type === 'data') term.write(msg.data); else if (msg.type === 'status') term.write(msg.msg); else if (msg.type === 'error') term.write('\\r\\n\\x1b[31m' + msg.msg + '\\x1b[0m'); }; ws.onclose = () => { term.writeln('\\r\\n\\x1b[31mConnection closed.\\x1b[0m'); }; } function sendCmd(cmd) { if (ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify({ type: 'data', data: cmd })); term.focus(); } else { alert('请先连接服务器！'); } }</script></body></html>`);
+    res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${sys.admin_title}</title><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" /><script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script><script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script><style>body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 20px; background: #f0f2f5; color: #333;} .card { background: white; padding: 25px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); max-width: 1200px; margin: 0 auto 20px auto; position: relative;} h2 { margin-top: 0; border-bottom: 2px solid #f0f2f5; padding-bottom: 10px; font-size: 20px;} table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px; } th, td { border: 1px solid #eee; padding: 12px; text-align: left; } th { background: #f8f9fa; } .btn { cursor: pointer; border-radius: 4px; font-size: 13px; transition: opacity 0.2s; border: none; padding: 6px 10px; color: white; margin-left: 5px; text-decoration: none;} .btn:hover { opacity: 0.8; } .btn-blue { background: #3b82f6; } .btn-green { background: #10b981; } .btn-red { background: #ef4444; } .btn-gray { background: #6b7280; } .btn-purple { background: #8b5cf6; } .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; } .form-group { display: flex; flex-direction: column; margin-bottom: 15px; } .form-group label { font-size: 14px; font-weight: 600; margin-bottom: 6px; color: #555;} .form-group input, .form-group select { padding: 10px; border: 1px solid #ccc; border-radius: 6px; } .checkbox-group { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 14px;} .checkbox-group input { width: 18px; height: 18px; cursor: pointer; } .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 100; } .modal-content { background: white; padding: 20px; border-radius: 8px; width: 450px; margin: 100px auto; position: relative;} .modal-large { width: 850px; margin: 50px auto; } .modal input { width: 100%; padding: 8px; margin-bottom: 12px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;} #terminal-container { height: 450px; background: #000; padding: 10px; border-radius: 6px; margin-top: 15px; } .preset-btns { display: flex; gap: 8px; margin-bottom: 15px; flex-wrap: wrap; } .preset-btn { background: #e5e7eb; border: 1px solid #d1d5db; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; font-family: monospace; color: #374151; }</style></head><body><div class="card"><a href="/logout" class="btn btn-red" style="position: absolute; right: 25px; top: 25px; font-weight: bold; padding: 8px 15px;">退出登录</a><h2>🛠️ 全局设置</h2><div class="settings-grid"><div><div class="form-group"><label>🎨 前端主题风格</label><select id="cfg_theme"><option value="theme1" ${sys.theme === 'theme1' ? 'selected' : ''}>1. 默认清爽白</option><option value="theme2" ${sys.theme === 'theme2' ? 'selected' : ''}>2. 暗黑极客</option><option value="theme3" ${sys.theme === 'theme3' ? 'selected' : ''}>3. 新粗野主义</option><option value="theme4" ${sys.theme === 'theme4' ? 'selected' : ''}>4. 动态渐变</option><option value="theme5" ${sys.theme === 'theme5' ? 'selected' : ''}>5. 赛博朋克</option></select></div><div class="form-group"><label>🖼️ 自定义背景图片 URL</label><input type="text" id="cfg_custom_bg" value="${sys.custom_bg || ''}"></div><div class="form-group"><label>前台看板标题</label><input type="text" id="cfg_site_title" value="${sys.site_title}"></div><div class="form-group"><label>后台标签栏名称</label><input type="text" id="cfg_admin_title" value="${sys.admin_title}"></div></div><div><label style="font-size: 14px; font-weight: 600; margin-bottom: 10px; display: block; color: #555;">👁️ 前台展示控制</label><div class="checkbox-group"><input type="checkbox" id="cfg_is_public" ${sys.is_public === 'true' ? 'checked' : ''}><label><b>公开访问</b></label></div><div class="checkbox-group"><input type="checkbox" id="cfg_show_price" ${sys.show_price === 'true' ? 'checked' : ''}><label>显示 <b>价格</b></label></div><div class="checkbox-group"><input type="checkbox" id="cfg_show_expire" ${sys.show_expire === 'true' ? 'checked' : ''}><label>显示 <b>到期时间</b></label></div><div class="checkbox-group"><input type="checkbox" id="cfg_show_bw" ${sys.show_bw === 'true' ? 'checked' : ''}><label>显示 <b>带宽徽章</b></label></div><div class="checkbox-group"><input type="checkbox" id="cfg_show_tf" ${sys.show_tf === 'true' ? 'checked' : ''}><label>显示 <b>流量配额徽章</b></label></div></div></div><button onclick="saveSettings()" class="btn btn-blue" style="padding: 10px 20px; font-size: 15px;">💾 保存全局设置</button></div><div class="card"><h2>${sys.admin_title} - 节点列表</h2><div style="margin-bottom: 15px;"><input type="text" id="newName" placeholder="输入新服务器名称" style="padding: 8px; width: 200px; border:1px solid #ccc; border-radius:4px;"><button onclick="addServer()" class="btn btn-blue" style="padding: 9px 15px;">+ 添加新服务器</button><a href="/" style="float: right; margin-top: 8px; color: #3b82f6; text-decoration: none; font-weight:bold;">👉 前往大盘预览</a></div><table><tr><th>节点名称</th><th>分组</th><th>在线状态</th><th>操作</th></tr>${trs || '<tr><td colspan="4" style="text-align:center; padding: 30px; color:#666;">暂无服务器，请在上方添加</td></tr>'}</table></div><div id="editModal" class="modal"><div class="modal-content"><h3 style="margin-top:0;">✏️ 编辑服务器信息</h3><input type="hidden" id="editId"><div style="display:flex; gap:10px;"><div style="flex:1"><label>分组名称</label> <input type="text" id="editGroup"></div><div style="flex:1"><label>价格</label> <input type="text" id="editPrice"></div></div><label>到期时间</label> <input type="date" id="editExpire"><div style="display:flex; gap:10px;"><div style="flex:1"><label>带宽</label> <input type="text" id="editBandwidth"></div><div style="flex:1"><label>流量总量</label> <input type="text" id="editTraffic"></div></div><hr style="margin: 15px 0; border: none; border-top: 1px dashed #ccc;">${ENABLE_WEB_SSH ? `<label style="color:#8b5cf6;">💻 SSH 直连高级配置</label><div style="display:flex; gap:10px;"><div style="flex:1"><label>连接 IP</label><input type="text" id="editSshHost" placeholder="填入将永久锁定，清空恢复自动获取"></div><div style="width:70px"><label>端口</label><input type="text" id="editSshPort"></div></div><div style="display:flex; gap:10px;"><div style="flex:1"><label>用户名</label><input type="text" id="editSshUser"></div><div style="flex:1"><label>临时密码</label><input type="password" id="editSshPass" placeholder="(无需填)"></div></div>` : ''}<div style="text-align: right; margin-top: 10px;"><button onclick="closeModal('editModal')" style="padding: 8px 15px; border: 1px solid #ccc; background: white; margin-right: 5px; cursor:pointer;">取消</button><button onclick="saveEdit()" class="btn btn-blue" style="padding: 8px 15px;">保存更改</button></div></div></div>${sshModalHtml}<script>async function apiCall(data) { const res = await fetch('/admin/api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }); if (res.status === 401) { alert('⚠️ 会话已过期，请点击确定后重新授权登录！'); location.reload(); return false; } if (!res.ok) { alert('操作失败'); return false; } return true; } async function saveSettings() { const data = { action: 'save_settings', settings: { theme: document.getElementById('cfg_theme').value, custom_bg: document.getElementById('cfg_custom_bg').value, site_title: document.getElementById('cfg_site_title').value, admin_title: document.getElementById('cfg_admin_title').value, is_public: document.getElementById('cfg_is_public').checked ? 'true' : 'false', show_price: document.getElementById('cfg_show_price').checked ? 'true' : 'false', show_expire: document.getElementById('cfg_show_expire').checked ? 'true' : 'false', show_bw: document.getElementById('cfg_show_bw').checked ? 'true' : 'false', show_tf: document.getElementById('cfg_show_tf').checked ? 'true' : 'false' } }; if (await apiCall(data)) { alert('✅ 设置已保存！'); location.reload(); } } async function addServer() { const name = document.getElementById('newName').value; if (!name) return alert('请输入名称'); if (await apiCall({ action: 'add', name })) location.reload(); } async function deleteServer(id) { if (!confirm('确定要删除这个节点吗？')) return; if (await apiCall({ action: 'delete', id })) location.reload(); } function copyCmd(id) { const input = document.getElementById('cmd-' + id); input.select(); document.execCommand('copy'); alert('✅ 一键安装命令已复制！'); } function openEditModal(id, group, price, expire, bw, traffic, shost, sport, suser) { document.getElementById('editId').value = id; document.getElementById('editGroup').value = group || '默认分组'; document.getElementById('editPrice').value = price || '免费'; document.getElementById('editExpire').value = expire || ''; document.getElementById('editBandwidth').value = bw || ''; document.getElementById('editTraffic').value = traffic || ''; if (${ENABLE_WEB_SSH}) { document.getElementById('editSshHost').value = shost || ''; document.getElementById('editSshPort').value = sport || '22'; document.getElementById('editSshUser').value = suser || 'root'; document.getElementById('editSshPass').value = ''; } document.getElementById('editModal').style.display = 'block'; } function closeModal(id) { document.getElementById(id).style.display = 'none'; } async function saveEdit() { const data = { action: 'edit', id: document.getElementById('editId').value, server_group: document.getElementById('editGroup').value, price: document.getElementById('editPrice').value, expire_date: document.getElementById('editExpire').value, bandwidth: document.getElementById('editBandwidth').value, traffic_limit: document.getElementById('editTraffic').value }; if (${ENABLE_WEB_SSH}) { data.ssh_host = document.getElementById('editSshHost').value; data.ssh_port = document.getElementById('editSshPort').value; data.ssh_user = document.getElementById('editSshUser').value; data.ssh_pass = document.getElementById('editSshPass').value; } if (await apiCall(data)) location.reload(); } let term, fitAddon, ws, termListener; function openSshModal(id, name, host, port, user) { document.getElementById('sshServerId').value = id; document.getElementById('sshTargetName').innerText = name; document.getElementById('sshHost').value = host || ''; document.getElementById('sshPort').value = port || '22'; document.getElementById('sshUser').value = user || 'root'; document.getElementById('sshPass').value = ''; document.getElementById('sshModal').style.display = 'block'; if (!term) { term = new Terminal({ cursorBlink: true, theme: { background: '#000' } }); fitAddon = new FitAddon.FitAddon(); term.loadAddon(fitAddon); term.open(document.getElementById('terminal-container')); } setTimeout(() => fitAddon.fit(), 100); term.reset(); term.writeln('Welcome to Web SSH Terminal.'); if(host) { term.writeln('\\x1b[36m✨ 探针已上报IP，正在通过 WARP 进行智能握手...\\x1b[0m'); setTimeout(connectSsh, 500); } } function closeSshModal() { document.getElementById('sshModal').style.display = 'none'; if (ws && ws.readyState === WebSocket.OPEN) ws.close(); } function connectSsh() { const serverId = document.getElementById('sshServerId').value; const host = document.getElementById('sshHost').value; const port = document.getElementById('sshPort').value; const username = document.getElementById('sshUser').value; const password = document.getElementById('sshPass').value; if (ws) ws.close(); term.reset(); term.writeln('\\x1b[33mConnecting to ' + host + '...\\x1b[0m'); const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'; ws = new WebSocket(protocol + '//' + location.host + '/ssh'); ws.onopen = () => { ws.send(JSON.stringify({ type: 'connect', serverId, host, port, username, password })); if (termListener) termListener.dispose(); termListener = term.onData(data => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'data', data })); }); }; ws.onmessage = (event) => { const msg = JSON.parse(event.data); if (msg.type === 'data') term.write(msg.data); else if (msg.type === 'status') term.write(msg.msg); else if (msg.type === 'error') term.write('\\r\\n\\x1b[31m' + msg.msg + '\\x1b[0m'); }; ws.onclose = () => { term.writeln('\\r\\n\\x1b[31mConnection closed.\\x1b[0m'); }; } function sendCmd(cmd) { if (ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify({ type: 'data', data: cmd })); term.focus(); } else { alert('请先连接服务器！'); } }</script></body></html>`);
 });
 
 app.get('/', (req, res) => {
@@ -394,7 +382,7 @@ app.get('/', (req, res) => {
 
     const viewId = req.query.id;
     if (viewId) {
-        const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(viewId);
+        const server = dbData.servers[viewId];
         if (!server) return res.status(404).send('Server not found');
         
         return res.send(`<!DOCTYPE html>
@@ -448,6 +436,7 @@ app.get('/', (req, res) => {
               <div class="chart-card"><h3>磁盘 <span class="chart-val" id="text-disk">0%</span></h3><div style="width:100%; height:20px; background:#e5e7eb; border-radius:10px; overflow:hidden; margin-top:40px;"><div id="disk-bar" style="height:100%; width:0%; background:#34d399; transition:width 0.5s;"></div></div><p style="text-align:right; font-size:12px; color:#6b7280; margin-top:8px;" id="text-disk-detail">0 / 0</p></div>
               <div class="chart-card"><h3>进程数 <span class="chart-val" id="text-proc">0</span></h3><canvas id="chartProc"></canvas></div>
               <div class="chart-card"><h3>网络速度 <span class="chart-val" style="font-size:14px;"><span style="color:#10b981">↓</span> <span id="text-net-in">0</span> | <span style="color:#3b82f6">↑</span> <span id="text-net-out">0</span></span></h3><canvas id="chartNet"></canvas></div>
+              
               <div class="chart-card chart-full">
                 <h3>国内延迟追踪 <span class="chart-val" style="font-size:12px; font-weight:normal;">电信 <b id="t-ct">0</b> | 联通 <b id="t-cu">0</b> | 移动 <b id="t-cm">0</b> | 字节 <b id="t-bd">0</b></span></h3>
                 <canvas id="chartPing"></canvas>
@@ -458,8 +447,7 @@ app.get('/', (req, res) => {
             const serverId = "${viewId}";
             const formatBytes = (bytes) => { const b = parseInt(bytes); if (isNaN(b) || b === 0) return '0 B'; const k = 1024; const sizes = ['B', 'KB', 'MB', 'GB', 'TB']; const i = Math.floor(Math.log(b) / Math.log(k)); return parseFloat((b / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]; };
             
-            let charts = {};
-            let historyFetched = false;
+            let charts = {}; let historyFetched = false;
 
             try {
                 const commonOptions = { responsive: true, maintainAspectRatio: false, animation: { duration: 0 }, scales: { x: { display: false }, y: { beginAtZero: true, border: { display: false } } }, plugins: { legend: { display: false }, tooltip: { enabled: false } }, elements: { point: { radius: 0 }, line: { tension: 0.4, borderWidth: 2 } } };
@@ -471,34 +459,17 @@ app.get('/', (req, res) => {
                 
                 const pingOptions = { 
                     responsive: true, maintainAspectRatio: false, animation: { duration: 0 }, 
-                    scales: { 
-                        x: { display: true, ticks: { maxTicksLimit: 15, color: '#9ca3af', font: { size: 10 } } }, 
-                        y: { beginAtZero: true, border: { display: false } } 
-                    }, 
-                    plugins: { 
-                        legend: { display: true, position: 'top', labels: { boxWidth: 12, font: { size: 11 } } }, 
-                        tooltip: { enabled: true, mode: 'index', intersect: false } 
-                    }, 
-                    elements: { 
-                        point: { radius: 0, hitRadius: 10, hoverRadius: 4 }, 
-                        line: { tension: 0.3, borderWidth: 2 } 
-                    } 
+                    scales: { x: { display: true, ticks: { maxTicksLimit: 15, color: '#9ca3af', font: { size: 10 } } }, y: { beginAtZero: true, border: { display: false } } }, 
+                    plugins: { legend: { display: true, position: 'top', labels: { boxWidth: 12, font: { size: 11 } } }, tooltip: { enabled: true, mode: 'index', intersect: false } }, 
+                    elements: { point: { radius: 0, hitRadius: 10, hoverRadius: 4 }, line: { tension: 0.3, borderWidth: 2 } } 
                 };
                 
                 charts.ping = new Chart(document.getElementById('chartPing').getContext('2d'), { 
                     type: 'line', 
-                    data: { 
-                        labels: [], 
-                        datasets: [ 
-                            { label: '电信', data: [], borderColor: '#10b981', backgroundColor: 'transparent' }, 
-                            { label: '联通', data: [], borderColor: '#f59e0b', backgroundColor: 'transparent' }, 
-                            { label: '移动', data: [], borderColor: '#3b82f6', backgroundColor: 'transparent' }, 
-                            { label: '字节', data: [], borderColor: '#8b5cf6', backgroundColor: 'transparent' } 
-                        ] 
-                    }, 
+                    data: { labels: [], datasets: [ { label: '电信', data: [], borderColor: '#10b981', backgroundColor: 'transparent' }, { label: '联通', data: [], borderColor: '#f59e0b', backgroundColor: 'transparent' }, { label: '移动', data: [], borderColor: '#3b82f6', backgroundColor: 'transparent' }, { label: '字节', data: [], borderColor: '#8b5cf6', backgroundColor: 'transparent' } ] }, 
                     options: pingOptions 
                 });
-            } catch(e) { console.error('图表加载失败', e); }
+            } catch(e) {}
 
             async function fetchHistory() {
                 try {
@@ -507,18 +478,10 @@ app.get('/', (req, res) => {
                     if(history.length > 0 && charts.ping) {
                         const ct = [], cu = [], cm = [], bd = [], labels = [];
                         history.forEach(h => {
-                            const d = new Date(h.created_at);
-                            labels.push(d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0'));
-                            ct.push(parseInt(h.ping_ct) || 0);
-                            cu.push(parseInt(h.ping_cu) || 0);
-                            cm.push(parseInt(h.ping_cm) || 0);
-                            bd.push(parseInt(h.ping_bd) || 0);
+                            const d = new Date(h.created_at); labels.push(d.getHours() + ':' + String(d.getMinutes()).padStart(2, '0'));
+                            ct.push(parseInt(h.ping_ct) || 0); cu.push(parseInt(h.ping_cu) || 0); cm.push(parseInt(h.ping_cm) || 0); bd.push(parseInt(h.ping_bd) || 0);
                         });
-                        charts.ping.data.labels = labels;
-                        charts.ping.data.datasets[0].data = ct;
-                        charts.ping.data.datasets[1].data = cu;
-                        charts.ping.data.datasets[2].data = cm;
-                        charts.ping.data.datasets[3].data = bd;
+                        charts.ping.data.labels = labels; charts.ping.data.datasets[0].data = ct; charts.ping.data.datasets[1].data = cu; charts.ping.data.datasets[2].data = cm; charts.ping.data.datasets[3].data = bd;
                         charts.ping.update();
                     }
                     historyFetched = true;
@@ -545,31 +508,15 @@ app.get('/', (req, res) => {
                     
                     if (charts.ping && historyFetched) {
                         let p_ct = parseInt(data.ping_ct) || 0; let p_cu = parseInt(data.ping_cu) || 0; let p_cm = parseInt(data.ping_cm) || 0; let p_bd = parseInt(data.ping_bd) || 0;
-                        
                         const getLast = (idx) => { const arr = charts.ping.data.datasets[idx].data; return arr[arr.length - 1] || 0; };
                         if (p_ct === 0) p_ct = getLast(0); if (p_cu === 0) p_cu = getLast(1); if (p_cm === 0) p_cm = getLast(2); if (p_bd === 0) p_bd = getLast(3);
 
-                        const now = new Date();
-                        const timeLabel = now.getHours() + ':' + String(now.getMinutes()).padStart(2, '0');
-                        const labels = charts.ping.data.labels;
-                        
+                        const now = new Date(); const timeLabel = now.getHours() + ':' + String(now.getMinutes()).padStart(2, '0'); const labels = charts.ping.data.labels;
                         if(labels.length > 0 && labels[labels.length - 1] === timeLabel) {
-                             const lastIdx = labels.length - 1;
-                             charts.ping.data.datasets[0].data[lastIdx] = p_ct;
-                             charts.ping.data.datasets[1].data[lastIdx] = p_cu;
-                             charts.ping.data.datasets[2].data[lastIdx] = p_cm;
-                             charts.ping.data.datasets[3].data[lastIdx] = p_bd;
+                             const lastIdx = labels.length - 1; charts.ping.data.datasets[0].data[lastIdx] = p_ct; charts.ping.data.datasets[1].data[lastIdx] = p_cu; charts.ping.data.datasets[2].data[lastIdx] = p_cm; charts.ping.data.datasets[3].data[lastIdx] = p_bd;
                         } else {
-                             charts.ping.data.labels.push(timeLabel);
-                             charts.ping.data.datasets[0].data.push(p_ct);
-                             charts.ping.data.datasets[1].data.push(p_cu);
-                             charts.ping.data.datasets[2].data.push(p_cm);
-                             charts.ping.data.datasets[3].data.push(p_bd);
-                             
-                             if(charts.ping.data.labels.length > 720) { 
-                                 charts.ping.data.labels.shift();
-                                 charts.ping.data.datasets.forEach(d => d.data.shift());
-                             }
+                             charts.ping.data.labels.push(timeLabel); charts.ping.data.datasets[0].data.push(p_ct); charts.ping.data.datasets[1].data.push(p_cu); charts.ping.data.datasets[2].data.push(p_cm); charts.ping.data.datasets[3].data.push(p_bd);
+                             if(charts.ping.data.labels.length > 720) { charts.ping.data.labels.shift(); charts.ping.data.datasets.forEach(d => d.data.shift()); }
                         }
                         charts.ping.update();
                     }
@@ -582,19 +529,18 @@ app.get('/', (req, res) => {
         </html>`);
     }
 
-    const results = db.prepare('SELECT * FROM servers').all();
     const now = Date.now();
     let globalOnline = 0; let globalOffline = 0; let globalSpeedIn = 0; let globalSpeedOut = 0; let globalNetTx = 0; let globalNetRx = 0;
     const groups = {};
 
-    if (results && results.length > 0) {
-        for (const server of results) {
+    if (Object.keys(dbData.servers).length > 0) {
+        for (const [id, server] of Object.entries(dbData.servers)) {
             const isOnline = (now - server.last_updated) < 30000;
             if (isOnline) { globalOnline++; globalSpeedIn += parseFloat(server.net_in_speed) || 0; globalSpeedOut += parseFloat(server.net_out_speed) || 0; } else globalOffline++;
             globalNetTx += parseFloat(server.net_tx) || 0; globalNetRx += parseFloat(server.net_rx) || 0;
             const grpName = server.server_group || '默认分组';
             if (!groups[grpName]) groups[grpName] = [];
-            groups[grpName].push(server);
+            groups[grpName].push({ id, ...server });
         }
     }
 
@@ -627,16 +573,12 @@ app.get('/', (req, res) => {
         }
     }
 
-    res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${sys.site_title}</title><style>body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #f4f5f7; color: #333; margin: 0; padding: 20px; } .container { max-width: 1200px; margin: 0 auto; } .global-stats { display: flex; flex-wrap: wrap; gap: 20px; justify-content: space-around; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.03); margin-bottom: 30px; text-align: center; } .g-item { flex: 1; min-width: 200px; } .g-val { font-size: 24px; font-weight: bold; color: #111; margin: 8px 0; } .g-label { font-size: 13px; color: #666; } .g-sub { font-size: 12px; color: #999; } .group-header { font-size: 18px; font-weight: 600; color: #444; margin: 25px 0 15px 5px; border-left: 4px solid #3b82f6; padding-left: 10px; } .grid-container { display: grid; grid-template-columns: repeat(auto-fill, minmax(480px, 1fr)); gap: 15px; } .vps-card { display: flex; justify-content: space-between; align-items: stretch; background: white; padding: 18px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); text-decoration: none; color: inherit; border: 1px solid transparent; transition: all 0.2s ease; } .vps-card:hover { border-color: #e5e7eb; transform: translateY(-2px); box-shadow: 0 8px 15px rgba(0,0,0,0.08); } .card-left { flex: 0 0 180px; display: flex; flex-direction: column; justify-content: center; } .card-title { display: flex; align-items: center; margin-bottom: 4px; } .card-title-text { font-weight: 600; } .status-dot { width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; flex-shrink:0; } .card-meta { font-size: 12px; color: #6b7280; margin-bottom: 3px; } .card-badges { margin-top: 10px; display: flex; gap: 5px; flex-wrap: wrap; } .badge { padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; color: white; } .badge-bw { background: #3b82f6; } .badge-tf { background: #10b981; } .badge-v4 { background: #a855f7; } .badge-v6 { background: #ec4899; } .card-right { flex: 1; display: flex; justify-content: space-between; align-items: center; padding-left: 15px; border-left: 1px solid #f0f0f0; } .stat-col { display: flex; flex-direction: column; align-items: center; width: 50px; } .stat-label { font-size: 11px; color: #888; margin-bottom: 8px; } .stat-val { font-size: 13px; font-weight: 600; color: #111; margin-bottom: 6px; } .stat-bar { width: 100%; height: 3px; background: #e5e7eb; border-radius: 2px; overflow: hidden; } .stat-bar > div { height: 100%; background: #3b82f6; border-radius: 2px; } .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; } .admin-btn { padding: 8px 16px; background: #3b82f6; color: white; text-decoration: none; border-radius: 6px; font-size: 14px; font-weight:bold; } @media (max-width: 600px) { .grid-container { grid-template-columns: 1fr; } .vps-card { flex-direction: column; } .card-right { padding-left: 0; border-left: none; border-top: 1px solid #f0f0f0; margin-top: 15px; padding-top: 15px; } } ${getThemeStyles(sys)}</style><meta http-equiv="refresh" content="5"></head><body class="${sys.theme || 'theme1'}"><div class="container"><div class="header"><h1 style="margin:0;">${sys.site_title}</h1><a href="/admin" class="admin-btn">${sys.admin_title}</a></div><div class="global-stats"><div class="g-item"><div class="g-label">服务器总数</div><div class="g-val">${results.length}</div><div class="g-sub">在线 <span style="color:#10b981">${globalOnline}</span> | 离线 <span style="color:#ef4444">${globalOffline}</span></div></div><div class="g-item"><div class="g-label">总计流量 (入 | 出)</div><div class="g-val">${formatBytes(globalNetRx)} | ${formatBytes(globalNetTx)}</div></div><div class="g-item"><div class="g-label">实时网速 (入 | 出)</div><div class="g-val"><span style="color:#10b981">↓</span> ${formatBytes(globalSpeedIn)}/s | <span style="color:#3b82f6">↑</span> ${formatBytes(globalSpeedOut)}/s</div></div></div>${contentHtml}${footerHtml}</div></body></html>`);
+    res.send(`<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${sys.site_title}</title><style>body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #f4f5f7; color: #333; margin: 0; padding: 20px; } .container { max-width: 1200px; margin: 0 auto; } .global-stats { display: flex; flex-wrap: wrap; gap: 20px; justify-content: space-around; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.03); margin-bottom: 30px; text-align: center; } .g-item { flex: 1; min-width: 200px; } .g-val { font-size: 24px; font-weight: bold; color: #111; margin: 8px 0; } .g-label { font-size: 13px; color: #666; } .g-sub { font-size: 12px; color: #999; } .group-header { font-size: 18px; font-weight: 600; color: #444; margin: 25px 0 15px 5px; border-left: 4px solid #3b82f6; padding-left: 10px; } .grid-container { display: grid; grid-template-columns: repeat(auto-fill, minmax(480px, 1fr)); gap: 15px; } .vps-card { display: flex; justify-content: space-between; align-items: stretch; background: white; padding: 18px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); text-decoration: none; color: inherit; border: 1px solid transparent; transition: all 0.2s ease; } .vps-card:hover { border-color: #e5e7eb; transform: translateY(-2px); box-shadow: 0 8px 15px rgba(0,0,0,0.08); } .card-left { flex: 0 0 180px; display: flex; flex-direction: column; justify-content: center; } .card-title { display: flex; align-items: center; margin-bottom: 4px; } .card-title-text { font-weight: 600; } .status-dot { width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; flex-shrink:0; } .card-meta { font-size: 12px; color: #6b7280; margin-bottom: 3px; } .card-badges { margin-top: 10px; display: flex; gap: 5px; flex-wrap: wrap; } .badge { padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; color: white; } .badge-bw { background: #3b82f6; } .badge-tf { background: #10b981; } .badge-v4 { background: #a855f7; } .badge-v6 { background: #ec4899; } .card-right { flex: 1; display: flex; justify-content: space-between; align-items: center; padding-left: 15px; border-left: 1px solid #f0f0f0; } .stat-col { display: flex; flex-direction: column; align-items: center; width: 50px; } .stat-label { font-size: 11px; color: #888; margin-bottom: 8px; } .stat-val { font-size: 13px; font-weight: 600; color: #111; margin-bottom: 6px; } .stat-bar { width: 100%; height: 3px; background: #e5e7eb; border-radius: 2px; overflow: hidden; } .stat-bar > div { height: 100%; background: #3b82f6; border-radius: 2px; } .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; } .admin-btn { padding: 8px 16px; background: #3b82f6; color: white; text-decoration: none; border-radius: 6px; font-size: 14px; font-weight:bold; } @media (max-width: 600px) { .grid-container { grid-template-columns: 1fr; } .vps-card { flex-direction: column; } .card-right { padding-left: 0; border-left: none; border-top: 1px solid #f0f0f0; margin-top: 15px; padding-top: 15px; } } ${getThemeStyles(sys)}</style><meta http-equiv="refresh" content="5"></head><body class="${sys.theme || 'theme1'}"><div class="container"><div class="header"><h1 style="margin:0;">${sys.site_title}</h1><a href="/admin" class="admin-btn">${sys.admin_title}</a></div><div class="global-stats"><div class="g-item"><div class="g-label">服务器总数</div><div class="g-val">${Object.keys(dbData.servers).length}</div><div class="g-sub">在线 <span style="color:#10b981">${globalOnline}</span> | 离线 <span style="color:#ef4444">${globalOffline}</span></div></div><div class="g-item"><div class="g-label">总计流量 (入 | 出)</div><div class="g-val">${formatBytes(globalNetRx)} | ${formatBytes(globalNetTx)}</div></div><div class="g-item"><div class="g-label">实时网速 (入 | 出)</div><div class="g-val"><span style="color:#10b981">↓</span> ${formatBytes(globalSpeedIn)}/s | <span style="color:#3b82f6">↑</span> ${formatBytes(globalSpeedOut)}/s</div></div></div>${contentHtml}${footerHtml}</div></body></html>`);
 });
-
-app.get('/update-pubkey', (req, res) => { res.setHeader('Content-Type', 'text/plain;charset=UTF-8'); res.send(MASTER_PUBLIC_KEY); });
 
 app.get('/install.sh', (req, res) => {
     const host = `${req.protocol}://${req.get('host')}`;
     let sshInjectLogic = '';
-    
-    // 如果开启了 Web SSH 功能，才下发并注入面板的公钥
     if (ENABLE_WEB_SSH) {
         sshInjectLogic = `
 echo "正在拉取面板公钥..."
@@ -784,31 +726,6 @@ echo "✅ 探针及发包保活安装成功！"
     res.send(bashScript);
 });
 
-app.post('/update', (req, res) => {
-    try {
-        const { id, secret, ssh_host, ssh_port, metrics } = req.body;
-        if (secret !== API_SECRET) return res.status(401).send('Unauthorized');
-        let countryCode = req.headers['cf-ipcountry'] || 'XX'; if (countryCode.toUpperCase() === 'TW') countryCode = 'CN';
-        
-        const serverExists = db.prepare('SELECT id, lock_ip, ssh_host, ssh_port FROM servers WHERE id = ?').get(id);
-        if (!serverExists) return res.status(404).send('Server not found');
-
-        const final_ssh_host = serverExists.lock_ip === '1' ? serverExists.ssh_host : (ssh_host || '');
-        const final_ssh_port = serverExists.lock_ip === '1' ? serverExists.ssh_port : (ssh_port || '22');
-
-        db.prepare(`UPDATE servers SET cpu = ?, ram = ?, disk = ?, load_avg = ?, uptime = ?, last_updated = ?, ram_total = ?, net_rx = ?, net_tx = ?, net_in_speed = ?, net_out_speed = ?, os = ?, cpu_info = ?, arch = ?, boot_time = ?, ram_used = ?, swap_total = ?, swap_used = ?, disk_total = ?, disk_used = ?, processes = ?, tcp_conn = ?, udp_conn = ?, country = ?, ip_v4 = ?, ip_v6 = ?, ping_ct = ?, ping_cu = ?, ping_cm = ?, ping_bd = ?, ssh_host = ?, ssh_port = ? WHERE id = ?`).run(metrics.cpu, metrics.ram, metrics.disk, metrics.load, metrics.uptime, Date.now(), metrics.ram_total || '0', metrics.net_rx || '0', metrics.net_tx || '0', metrics.net_in_speed || '0', metrics.net_out_speed || '0', metrics.os || '', metrics.cpu_info || '', metrics.arch || '', metrics.boot_time || '', metrics.ram_used || '0', metrics.swap_total || '0', metrics.swap_used || '0', metrics.disk_total || '0', metrics.disk_used || '0', metrics.processes || '0', metrics.tcp_conn || '0', metrics.udp_conn || '0', countryCode, metrics.ip_v4 || '0', metrics.ip_v6 || '0', metrics.ping_ct || '0', metrics.ping_cu || '0', metrics.ping_cm || '0', metrics.ping_bd || '0', final_ssh_host, final_ssh_port, id);
-        
-        const nowMs = Date.now();
-        if (!lastHistorySave[id] || nowMs - lastHistorySave[id] > 60000) {
-            db.prepare(`INSERT INTO metrics_history (server_id, created_at, ping_ct, ping_cu, ping_cm, ping_bd) VALUES (?, ?, ?, ?, ?, ?)`).run(id, nowMs, metrics.ping_ct || '0', metrics.ping_cu || '0', metrics.ping_cm || '0', metrics.ping_bd || '0');
-            db.prepare(`DELETE FROM metrics_history WHERE server_id = ? AND created_at < ?`).run(id, nowMs - 12 * 60 * 60 * 1000);
-            lastHistorySave[id] = nowMs;
-        }
-        
-        checkOfflineNodes().catch(console.error); res.status(200).send('OK');
-    } catch (e) { res.status(400).send('Error'); }
-});
-
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server Monitor Pro (All-in-One WARP Edition) running on port ${PORT}`);
+    console.log(`Server Monitor Pro (Stateless Telegram Edition) running on port ${PORT}`);
 });
