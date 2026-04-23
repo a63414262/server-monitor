@@ -60,11 +60,17 @@
 
 
 PORT="3000"
+
 API_SECRET="大小加数字就行"
+
 GITHUB_CLIENT_ID="填你的"
+
 GITHUB_CLIENT_SECRET="填你的"
+
 GITHUB_ALLOWED_USERS="填你的"
+
 TG_BOT_TOKEN="填你的"
+
 TG_CHAT_ID="填你的"
 
 ### 5. 持久化存储 (Storage / Volumes) ⚠️ 极其重要
