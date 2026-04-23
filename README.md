@@ -56,25 +56,14 @@
 ### 3. 用量限制 (Usage)
 * **Replicas (副本数)**: 保持默认 `1` 即可。CPU 和内存给默认基础配置完全够用。
 
-### 4. 环境变量 (Environment Variables) ⚠️ 核心
-点击 `+ Add Variable` 依次添加以下 4 个环境变量：
-* `PORT` = `3000` 
-* `API_SECRET` = `你自定义的探针通信秘钥` (例如 `MySecret123456`)
-* `GITHUB_CLIENT_ID` = `第一步获取的 Client ID`
-* `GITHUB_CLIENT_SECRET` = `第一步获取的 Client Secret`
-* `GITHUB_ALLOWED_USERS` = `你的GitHub用户名` (防止陌生人授权进入，如有多个管理员用逗号分隔)
+### 4. 环境变量 (Environment Variables) ⚠️ 核心 northflank 选 env
 
-PORT=3000
 
-API_SECRET=
-
-GITHUB_CLIENT_ID=
-
-GITHUB_CLIENT_SECRET=
-
-GITHUB_ALLOWED_USERS=
-
-ENABLE_WEB_SSH=
+PORT="3000"
+API_SECRET="大小加数字就行"
+GITHUB_CLIENT_ID="填你的"
+GITHUB_CLIENT_SECRET="填你的"
+GITHUB_ALLOWED_USERS="填你的"
 
 
 ### 5. 持久化存储 (Storage / Volumes) ⚠️ 极其重要
